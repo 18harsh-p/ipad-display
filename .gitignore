@@ -1,0 +1,38 @@
+# Xcode
+#
+# gitignore template for Xcode programs
+#
+.DS_Store
+*/.DS_Store
+
+# Xcode User Data & State
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+build/
+DerivedData/
+*.moved-aside
+*.xcuserstate
+
+# Swift Package Manager
+.build/
+.swiftpm/xcode
+
+# Fastlane / CocoaPods / Carthage
+Pods/
+Carthage/Build/
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots
+fastlane/test_output
+
+# Local App Config & Runtime State
+.config/
+sunshine.log
+sunshine.pid
+api-login.json
+sunshine_state.json
+
+# System & OS Artifacts
+.Spotlight-V100
+.Trashes
