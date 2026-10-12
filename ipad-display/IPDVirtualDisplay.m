@@ -42,7 +42,7 @@ static void IPDFail(NSError **error, NSInteger code, NSString *message) {
 }
 
 @interface IPDVirtualDisplay ()
-@property (nonatomic, strong) id display;  // the CGVirtualDisplay; releasing it removes the display
+@property (nonatomic, strong, nullable) id display;  // the CGVirtualDisplay; releasing it removes the display
 @property (nonatomic, readwrite) CGDirectDisplayID displayID;
 @end
 
@@ -111,6 +111,15 @@ static void IPDFail(NSError **error, NSInteger code, NSString *message) {
     result.display = display;
     result.displayID = display.displayID;
     return result;
+}
+
+- (void)destroy {
+    self.display = nil;
+    self.displayID = 0;
+}
+
+- (void)dealloc {
+    [self destroy];
 }
 
 @end

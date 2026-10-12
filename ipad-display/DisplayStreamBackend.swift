@@ -21,9 +21,9 @@ final class DisplayStreamBackend: StreamBackend {
     private let sunshine: SunshineProcess
     private let displays = VirtualDisplayManager()
     private var relay: ScreenRelay?
-    private let queue = DispatchQueue(label: "ipad-display.backend")
     private let stateLock = NSLock()
     private var currentState: StreamState = .stopped
+    private var currentTask: Task<Void, Never>?
 
     init(sunshine: SunshineProcess) {
         self.sunshine = sunshine
@@ -33,18 +33,19 @@ final class DisplayStreamBackend: StreamBackend {
     // MARK: - StreamBackend
 
     func apply(_ settings: DisplaySettings, completion: @escaping (Result<Void, Error>) -> Void) {
-        Task {
+        currentTask?.cancel()
+        currentTask = Task {
             NSLog("[Backend] apply called: orientation=%@, preset=%@, refreshRate=%d, hiDPI=%d", settings.orientation.rawValue, settings.preset.name, settings.refreshRate, settings.hiDPI ? 1 : 0)
             setState(.starting)
             let result: Result<Void, Error>
             do {
                 // Stop Sunshine and previous relay
                 sunshine.stop()
-                await MainActor.run {
-                    self.relay?.stop()
-                    self.relay = nil
-                }
-                try displays.destroy()
+                self.relay?.stop()
+                self.relay = nil
+                try await displays.destroy()
+
+                guard !Task.isCancelled else { return }
 
                 let p = settings.preset
                 let captureDisplayID: CGDirectDisplayID
@@ -52,7 +53,7 @@ final class DisplayStreamBackend: StreamBackend {
                 switch settings.orientation {
                 case .landscape:
                     NSLog("[Backend] Creating landscape display (%dx%d)", p.landscapeWidth, p.landscapeHeight)
-                    let id = try displays.createLandscape(
+                    let id = try await displays.createLandscape(
                         width: p.landscapeWidth,
                         height: p.landscapeHeight,
                         refreshRate: settings.refreshRate,
@@ -62,14 +63,9 @@ final class DisplayStreamBackend: StreamBackend {
                     NSLog("[Backend] Created landscape display ID: %u", id)
 
                 case .portrait:
-                    // Guard permission before creating displays or windows
-                    guard CGPreflightScreenCaptureAccess() else {
-                        CGRequestScreenCaptureAccess()
-                        throw DisplayError.screenRecordingPermissionRequired
-                    }
 
                     NSLog("[Backend] Creating portrait displays (%dx%d)", p.landscapeWidth, p.landscapeHeight)
-                    let pair = try displays.createPortrait(
+                    let pair = try await displays.createPortrait(
                         landscapeWidth: p.landscapeWidth,
                         landscapeHeight: p.landscapeHeight,
                         refreshRate: settings.refreshRate,
@@ -77,13 +73,15 @@ final class DisplayStreamBackend: StreamBackend {
                     )
                     NSLog("[Backend] Created portrait pair: desktop=%u, stream=%u", pair.desktopID, pair.streamID)
 
+                    guard !Task.isCancelled else {
+                        try? await displays.destroy()
+                        return
+                    }
+
                     // Start hardware-accelerated ScreenRelay
                     NSLog("[Backend] Starting ScreenRelay...")
-                    let newRelay = try await MainActor.run { () throws -> ScreenRelay in
-                        let r = try ScreenRelay.create()
-                        self.relay = r
-                        return r
-                    }
+                    let newRelay = try ScreenRelay.create()
+                    self.relay = newRelay
                     try await newRelay.start(
                         sourceDisplayID: pair.desktopID,
                         targetDisplayID: pair.streamID,
@@ -96,6 +94,13 @@ final class DisplayStreamBackend: StreamBackend {
                     captureDisplayID = pair.streamID
                 }
 
+                guard !Task.isCancelled else {
+                    self.relay?.stop()
+                    self.relay = nil
+                    try? await displays.destroy()
+                    return
+                }
+
                 NSLog("[Backend] Starting Sunshine for display ID: %u", captureDisplayID)
                 try sunshine.start(displayID: captureDisplayID)
                 NSLog("[Backend] Sunshine started successfully")
@@ -104,11 +109,9 @@ final class DisplayStreamBackend: StreamBackend {
                 result = .success(())
             } catch {
                 NSLog("[Backend] apply failed with error: %@", error.localizedDescription)
-                await MainActor.run {
-                    self.relay?.stop()
-                    self.relay = nil
-                }
-                try? displays.destroy()
+                self.relay?.stop()
+                self.relay = nil
+                try? await displays.destroy()
                 setState(.failed(error.localizedDescription))
                 result = .failure(error)
             }
@@ -117,15 +120,23 @@ final class DisplayStreamBackend: StreamBackend {
     }
 
     func stop() {
-        Task {
-            sunshine.stop()
-            await MainActor.run {
+        currentTask?.cancel()
+        currentTask = nil
+
+        sunshine.stop()
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
                 self.relay?.stop()
                 self.relay = nil
             }
-            try? displays.destroy()
-            setState(.stopped)
+        } else {
+            DispatchQueue.main.sync {
+                self.relay?.stop()
+                self.relay = nil
+            }
         }
+        displays.destroySync()
+        setState(.stopped)
     }
 
     func pair(pin: String, deviceName: String, completion: @escaping (Result<Void, Error>) -> Void) {
@@ -138,6 +149,19 @@ final class DisplayStreamBackend: StreamBackend {
                 guard try await sunshine.submitPIN(pairingID: target.id, pin: pin, name: name) else {
                     throw SunshineError.pairingRejected
                 }
+                result = .success(())
+            } catch {
+                result = .failure(error)
+            }
+            await MainActor.run { completion(result) }
+        }
+    }
+
+    func unpairAll(completion: @escaping (Result<Void, Error>) -> Void) {
+        Task {
+            let result: Result<Void, Error>
+            do {
+                try await sunshine.unpairAll()
                 result = .success(())
             } catch {
                 result = .failure(error)

@@ -1,28 +1,17 @@
 // SunshineProcess.swift
 //
-// Runs the bundled, stripped-down Sunshine as a child process and talks to it.
+// Manages the Sunshine background process. Owns its configuration file, API credentials,
+// and the loopback HTTP client used for PIN pairing.
 //
-//  * Everything Sunshine writes lives in ~/.config/ipad-display (its own config, state, keys,
-//    log), so it never touches an existing Sunshine install in ~/.config/sunshine. The path has
-//    no spaces on purpose, because Sunshine's config file does not support quoting.
-//  * Sunshine's local HTTPS API (port 47990 by default) is limited to this Mac
-//    (origin_web_ui_allowed = pc) and protected with a random password kept in a 0600 file.
-//  * State comes from Sunshine's console output: "Configuration UI available" means ready,
-//    "CLIENT CONNECTED" / "CLIENT DISCONNECTED" mean the iPad came or went. If a future
-//    Sunshine changes those texts, state reporting degrades but streaming still works.
-//
-// start() and stop() block, so call them from the backend's serial queue.
+// Lifecycle:
+//   - init() finds the binary (in app bundle or Homebrew) and prepares ~/.config/ipad-display.
+//   - start(displayID:) writes sunshine.conf with the given display number, launches the
+//     process, and waits for the API to report ready.
+//   - stop() sends SIGTERM, waits up to 4s, and sends SIGKILL if it is still alive.
+//   - submitPIN() talks to Sunshine's local REST API to accept a client that has connected.
 
-import CoreGraphics
-import Darwin
 import Foundation
-
-enum SunshineEvent {
-    case ready(port: Int)
-    case clientConnected
-    case clientDisconnected
-    case exited(status: Int32)
-}
+import SystemConfiguration
 
 enum SunshineError: LocalizedError {
     case binaryNotFound
@@ -35,47 +24,52 @@ enum SunshineError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .binaryNotFound:
-            return "The streaming engine (sunshine) is missing from the app."
+            return "Sunshine was not found. Install it with 'brew install sunshine' or copy Sunshine.app to /Applications."
         case .credentialSetupFailed:
-            return "Could not set up the streaming engine's local login."
-        case .startFailed(let detail):
-            return "The streaming engine did not start. \(detail)"
+            return "Could not initialize Sunshine's credentials."
+        case .startFailed(let details):
+            return "Sunshine failed to start: \(details)"
         case .noPendingPairing:
-            return "No pairing request found. On the iPad open Moonlight, tap this Mac, wait for the PIN to appear, then try again."
+            return "No iPad is currently trying to pair. Open Moonlight on the iPad, tap this Mac, and enter the PIN shown there."
         case .pairingRejected:
-            return "Pairing failed. Check the PIN and try again."
+            return "Sunshine rejected the PIN. Check that it matches what Moonlight is displaying."
         case .http(let code):
-            return "The streaming engine answered with error \(code)."
+            return "Sunshine's local API returned HTTP \(code)."
         }
     }
 }
 
-struct SunshinePaths {
-    let root: URL
-    var config: URL { root.appendingPathComponent("sunshine.conf") }
-    var state: URL { root.appendingPathComponent("sunshine_state.json") }
-    var credentials: URL { root.appendingPathComponent("sunshine_credentials.json") }
-    var privateKey: URL { root.appendingPathComponent("cakey.pem") }
-    var certificate: URL { root.appendingPathComponent("cacert.pem") }
-    var log: URL { root.appendingPathComponent("sunshine.log") }
-    var apps: URL { root.appendingPathComponent("apps.json") }
-    var apiLogin: URL { root.appendingPathComponent("api-login.json") }
-    var pid: URL { root.appendingPathComponent("sunshine.pid") }
+enum SunshineEvent {
+    case ready(port: Int)
+    case clientConnected
+    case clientDisconnected
+    case exited(status: Int32)
+}
+
+struct Pairing: Decodable {
+    let id: String
+    let name: String
+}
+
+private struct Login: Codable {
+    let username: String
+    let password: String
 }
 
 final class SunshineProcess {
-    struct Pairing: Decodable {
-        let id: String
-        let name: String
-        let address: String
+    struct SunshinePaths {
+        let root: URL
+        var config: URL { root.appendingPathComponent("sunshine.conf") }
+        var state: URL { root.appendingPathComponent("sunshine_state.json") }
+        var credentials: URL { root.appendingPathComponent("sunshine_credentials.json") }
+        var apiLogin: URL { root.appendingPathComponent("api-login.json") }
+        var privateKey: URL { root.appendingPathComponent("cakey.pem") }
+        var certificate: URL { root.appendingPathComponent("cacert.pem") }
+        var log: URL { root.appendingPathComponent("sunshine.log") }
+        var apps: URL { root.appendingPathComponent("apps.json") }
+        var pid: URL { root.appendingPathComponent("sunshine.pid") }
     }
 
-    private struct Login: Codable {
-        let username: String
-        let password: String
-    }
-
-    /// Called on a background queue.
     var onEvent: ((SunshineEvent) -> Void)?
 
     private let paths: SunshinePaths
@@ -113,6 +107,25 @@ final class SunshineProcess {
         }
         guard FileManager.default.isExecutableFile(atPath: self.executable.path) else {
             throw SunshineError.binaryNotFound
+        }
+        reapStaleProcess()
+
+        // Import existing Sunshine credentials if available so paired iPads are retained
+        if !FileManager.default.fileExists(atPath: paths.certificate.path) {
+            let userSunshine = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/sunshine", isDirectory: true)
+            let userCert = userSunshine.appendingPathComponent("credentials/cacert.pem")
+            let userKey = userSunshine.appendingPathComponent("credentials/cakey.pem")
+            let userState = userSunshine.appendingPathComponent("sunshine_state.json")
+            if FileManager.default.fileExists(atPath: userCert.path),
+               FileManager.default.fileExists(atPath: userKey.path) {
+                try? FileManager.default.createDirectory(at: paths.root, withIntermediateDirectories: true)
+                try? FileManager.default.copyItem(at: userCert, to: paths.certificate)
+                try? FileManager.default.copyItem(at: userKey, to: paths.privateKey)
+                if FileManager.default.fileExists(atPath: userState.path),
+                   !FileManager.default.fileExists(atPath: paths.state.path) {
+                    try? FileManager.default.copyItem(at: userState, to: paths.state)
+                }
+            }
         }
     }
 
@@ -186,18 +199,20 @@ final class SunshineProcess {
         let child = process
         process = nil  // cleared first so the termination handler knows this exit is expected
         lock.unlock()
-        guard let child else { return }
 
-        if child.isRunning {
-            child.terminate()  // SIGTERM: Sunshine shuts down cleanly
-            for _ in 0..<80 where child.isRunning {
-                Thread.sleep(forTimeInterval: 0.05)
-            }
+        if let child {
             if child.isRunning {
-                kill(child.processIdentifier, SIGKILL)
-                child.waitUntilExit()
+                child.terminate()  // SIGTERM: Sunshine shuts down cleanly
+                for _ in 0..<80 where child.isRunning {
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
+                if child.isRunning {
+                    kill(child.processIdentifier, SIGKILL)
+                    child.waitUntilExit()
+                }
             }
         }
+        reapStaleProcess()
         try? FileManager.default.removeItem(at: paths.pid)
     }
 
@@ -238,21 +253,31 @@ final class SunshineProcess {
 
         var seenCerts = Set<String>()
         var deduplicated: [[String: Any]] = []
+        var modified = false
 
         for device in devices {
             if let cert = device["cert"] as? String {
                 let trimmed = cert.trimmingCharacters(in: .whitespacesAndNewlines)
                 if seenCerts.insert(trimmed).inserted {
                     var cleanDevice = device
-                    cleanDevice["enabled"] = "true"
+                    // Sunshine's C++ state serializer expects "enabled" as a boolean (bool enabled = true)
+                    let isEnabled = (cleanDevice["enabled"] as? Bool == true) ||
+                                    (cleanDevice["enabled"] as? String == "true") ||
+                                    (cleanDevice["enabled"] == nil)
+                    if cleanDevice["enabled"] as? Bool != isEnabled {
+                        cleanDevice["enabled"] = isEnabled
+                        modified = true
+                    }
                     deduplicated.append(cleanDevice)
+                } else {
+                    modified = true
                 }
             } else {
                 deduplicated.append(device)
             }
         }
 
-        if deduplicated.count != devices.count {
+        if modified || deduplicated.count != devices.count {
             root["named_devices"] = deduplicated
             json["root"] = root
             if let output = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
@@ -267,14 +292,16 @@ final class SunshineProcess {
         try FileManager.default.createDirectory(at: paths.root, withIntermediateDirectories: true)
 
         let config = """
-        sunshine_name = iPad Display
+        output_name = \(displayID)
         min_log_level = info
         origin_web_ui_allowed = pc
+        platform = macos
         system_tray = disabled
-        vt_software = allowed
-        output_name = \(displayID)
-        fps = [30, 60]
         resolutions = [2048x1536, 1536x2048, 1600x1200, 1200x1600, 1024x768, 768x1024]
+        fps = [30, 60]
+        vt_software = allowed
+        stream_audio = disabled
+
         file_state = \(paths.state.path)
         credentials_file = \(paths.credentials.path)
         pkey = \(paths.privateKey.path)
@@ -307,7 +334,7 @@ final class SunshineProcess {
             login = existing
         } else {
             let alphabet = Array("abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789")
-            let password = String((0..<32).map { _ in alphabet.randomElement()! })
+            let password = String((0..<32).map { _ in alphabet.randomElement()! } )
             login = Login(username: "ipad-display", password: password)
             let data = try JSONEncoder().encode(login)
             // Created with owner-only permissions from the start.
@@ -348,16 +375,18 @@ final class SunshineProcess {
             lines.append(String(decoding: lineBuffer[lineBuffer.startIndex..<newline], as: UTF8.self))
             lineBuffer.removeSubrange(lineBuffer.startIndex...newline)
         }
+        recentLines.append(contentsOf: lines)
+        if recentLines.count > 30 {
+            recentLines.removeFirst(recentLines.count - 30)
+        }
         lock.unlock()
-        for line in lines { handle(line: line) }
+
+        for line in lines {
+            handleLine(line)
+        }
     }
 
-    private func handle(line: String) {
-        lock.lock()
-        recentLines.append(line)
-        if recentLines.count > 30 { recentLines.removeFirst() }
-        lock.unlock()
-
+    private func handleLine(_ line: String) {
         if line.contains("Configuration UI available") {
             var port = 47990
             if let range = line.range(of: #":(\d{2,5})\]"#, options: .regularExpression),
@@ -408,6 +437,21 @@ final class SunshineProcess {
         return success
     }
 
+    func unpairAll() async throws {
+        _ = try? await request(path: "/api/clients/unpair-all", method: "POST", body: nil, timeout: 5)
+        // Ensure state file on disk is completely wiped of paired clients
+        if FileManager.default.fileExists(atPath: paths.state.path),
+           let data = try? Data(contentsOf: paths.state),
+           var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           var root = json["root"] as? [String: Any] {
+            root["named_devices"] = []
+            json["root"] = root
+            if let output = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
+                try? output.write(to: paths.state, options: .atomic)
+            }
+        }
+    }
+
     private func request(path: String, method: String, body: Data?, timeout: TimeInterval) async throws -> Data {
         let (running, port) = lock.withLock {
             (process != nil, apiPort)
@@ -439,10 +483,9 @@ private final class LocalTrustDelegate: NSObject, URLSessionDelegate {
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
-        let space = challenge.protectionSpace
-        if space.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-           space.host == "127.0.0.1",
-           let trust = space.serverTrust {
+        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+           let trust = challenge.protectionSpace.serverTrust,
+           challenge.protectionSpace.host == "127.0.0.1" {
             completionHandler(.useCredential, URLCredential(trust: trust))
         } else {
             completionHandler(.performDefaultHandling, nil)

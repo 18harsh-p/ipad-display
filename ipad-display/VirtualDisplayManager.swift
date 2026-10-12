@@ -26,7 +26,7 @@ enum DisplayError: LocalizedError {
         case .didNotDisappear:
             return "The old virtual display did not go away. Quit and reopen the app."
         case .screenRecordingPermissionRequired:
-            return "Portrait mode requires Screen Recording permission so ipad-display can rotate the video stream for Moonlight without black bars. Please enable it in System Settings > Privacy & Security > Screen Recording."
+            return "Screen Recording permission is required so ipad-display and Sunshine can capture the display for Moonlight. Please enable it in System Settings > Privacy & Security > Screen Recording for both ipad-display and Sunshine."
         }
     }
 }
@@ -56,10 +56,10 @@ final class VirtualDisplayManager {
     }
 
     /// Creates a single landscape display. Returns the display ID.
-    func createLandscape(width: Int, height: Int, refreshRate: Int, hiDPI: Bool) throws -> CGDirectDisplayID {
+    func createLandscape(width: Int, height: Int, refreshRate: Int, hiDPI: Bool) async throws -> CGDirectDisplayID {
         guard IPDVirtualDisplay.isAvailable() else { throw DisplayError.unavailable }
-        try destroy()
-        Thread.sleep(forTimeInterval: 0.1)
+        try await destroy()
+        try? await Task.sleep(nanoseconds: 100_000_000)
 
         let serial = Self.serial(width: width, height: height, refreshRate: refreshRate, hiDPI: hiDPI)
         let created = try IPDVirtualDisplay.make(
@@ -77,9 +77,9 @@ final class VirtualDisplayManager {
         desktopDisplayID = id
         streamDisplayID = id
 
-        guard Self.wait(timeout: 15, until: { Self.isActive(id) }) else {
+        guard await Self.waitAsync(timeout: 15, until: { Self.isDisplayActive(id) }) else {
             NSLog("[VirtualDisplayManager] Timed out waiting for display ID: %u to appear", id)
-            try? destroy()
+            try? await destroy()
             throw DisplayError.didNotAppear
         }
         NSLog("[VirtualDisplayManager] Display ID %u is online and active", id)
@@ -92,10 +92,10 @@ final class VirtualDisplayManager {
         landscapeHeight: Int,
         refreshRate: Int,
         hiDPI: Bool
-    ) throws -> (desktopID: CGDirectDisplayID, streamID: CGDirectDisplayID) {
+    ) async throws -> (desktopID: CGDirectDisplayID, streamID: CGDirectDisplayID) {
         guard IPDVirtualDisplay.isAvailable() else { throw DisplayError.unavailable }
-        try destroy()
-        Thread.sleep(forTimeInterval: 0.1)
+        try await destroy()
+        try? await Task.sleep(nanoseconds: 100_000_000)
 
         // 1. User's portrait desktop (e.g. 1536 x 2048)
         let desktopSerial = Self.serial(width: landscapeHeight, height: landscapeWidth, refreshRate: refreshRate, hiDPI: hiDPI)
@@ -125,8 +125,8 @@ final class VirtualDisplayManager {
         relayDisplay = relay
         streamDisplayID = sID
 
-        guard Self.wait(timeout: 15, until: { Self.isActive(dID) && Self.isActive(sID) }) else {
-            try? destroy()
+        guard await Self.waitAsync(timeout: 15, until: { Self.isDisplayActive(dID) && Self.isDisplayActive(sID) }) else {
+            try? await destroy()
             throw DisplayError.didNotAppear
         }
 
@@ -134,27 +134,67 @@ final class VirtualDisplayManager {
     }
 
     /// Removes all virtual displays (if any) and waits until macOS no longer lists them. Safe to call twice.
-    func destroy() throws {
-        let oldIDs = [desktopDisplayID, streamDisplayID].compactMap { $0 }
+    func destroy() async throws {
+        let oldIDs = Set([desktopDisplayID, streamDisplayID].compactMap { $0 }.filter { $0 != 0 })
         guard !oldIDs.isEmpty else { return }
 
+        NSLog("[VirtualDisplayManager] destroy() called for IDs: %@", oldIDs.map(String.init).joined(separator: ", "))
+        desktopDisplay?.destroy()
         desktopDisplay = nil
-        if relayDisplay != nil {
+        if let relay = relayDisplay {
+            relay.destroy()
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            relayDisplay = nil
+        }
+        desktopDisplayID = nil
+        streamDisplayID = nil
+
+        let disappeared = await Self.waitAsync(timeout: 10, until: { oldIDs.allSatisfy { !Self.isDisplayPresent($0) } })
+        if !disappeared {
+            let lingering = oldIDs.filter { Self.isDisplayPresent($0) }
+            NSLog("[VirtualDisplayManager] destroy() timed out. Still present IDs: %@", lingering.map(String.init).joined(separator: ", "))
+            throw DisplayError.didNotDisappear
+        }
+        NSLog("[VirtualDisplayManager] destroy() completed. All old IDs are gone.")
+    }
+
+    /// Synchronous version for app termination.
+    func destroySync() {
+        let oldIDs = Set([desktopDisplayID, streamDisplayID].compactMap { $0 }.filter { $0 != 0 })
+        guard !oldIDs.isEmpty else { return }
+
+        NSLog("[VirtualDisplayManager] destroySync() called for IDs: %@", oldIDs.map(String.init).joined(separator: ", "))
+        desktopDisplay?.destroy()
+        desktopDisplay = nil
+        if let relay = relayDisplay {
+            relay.destroy()
             Thread.sleep(forTimeInterval: 0.05)
             relayDisplay = nil
         }
         desktopDisplayID = nil
         streamDisplayID = nil
 
-        guard Self.wait(timeout: 10, until: { oldIDs.allSatisfy { !Self.isActive($0) } }) else {
-            throw DisplayError.didNotDisappear
-        }
+        _ = Self.waitSync(timeout: 3, until: { oldIDs.allSatisfy { !Self.isDisplayPresent($0) } })
     }
 
     // MARK: - Helpers
 
-    private static func isActive(_ id: CGDirectDisplayID) -> Bool {
-        if CGDisplayIsOnline(id) != 0 || CGDisplayIsActive(id) != 0 {
+    /// Verifies that the display is not only online but actively published in macOS active displays list,
+    /// ensuring Sunshine/encoders can successfully open and stream it.
+    private static func isDisplayActive(_ id: CGDirectDisplayID) -> Bool {
+        guard id != 0 else { return false }
+        guard CGDisplayIsActive(id) == 1 else { return false }
+        var activeCount: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &activeCount) == .success, activeCount > 0 else { return false }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(activeCount))
+        guard CGGetActiveDisplayList(activeCount, &ids, &activeCount) == .success else { return false }
+        return ids.prefix(Int(activeCount)).contains(id)
+    }
+
+    /// Checks whether the display is still reported as online or active by macOS.
+    private static func isDisplayPresent(_ id: CGDirectDisplayID) -> Bool {
+        guard id != 0 else { return false }
+        if CGDisplayIsOnline(id) == 1 || CGDisplayIsActive(id) == 1 {
             return true
         }
         var onlineCount: UInt32 = 0
@@ -164,21 +204,27 @@ final class VirtualDisplayManager {
                 if ids.prefix(Int(onlineCount)).contains(id) { return true }
             }
         }
-        var activeCount: UInt32 = 0
-        if CGGetActiveDisplayList(0, nil, &activeCount) == .success, activeCount > 0 {
-            var ids = [CGDirectDisplayID](repeating: 0, count: Int(activeCount))
-            if CGGetActiveDisplayList(activeCount, &ids, &activeCount) == .success {
-                if ids.prefix(Int(activeCount)).contains(id) { return true }
-            }
-        }
         return false
     }
 
-    private static func wait(timeout: TimeInterval, until condition: () -> Bool) -> Bool {
+    private static func waitAsync(timeout: TimeInterval, until condition: () -> Bool) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if condition() { return true }
-            Thread.sleep(forTimeInterval: 0.05)
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return condition()
+    }
+
+    private static func waitSync(timeout: TimeInterval, until condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            if Thread.isMainThread {
+                _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+            } else {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
         }
         return condition()
     }

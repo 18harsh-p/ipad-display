@@ -103,8 +103,12 @@ final class ScreenRelay: NSObject, SCStreamDelegate {
         orientation: CGImagePropertyOrientation
     ) async throws {
         // 1. Verify ScreenCaptureKit access BEFORE creating any window or views
-        if !CGPreflightScreenCaptureAccess() {
-            CGRequestScreenCaptureAccess()
+        do {
+            _ = try await SCShareableContent.current
+        } catch {
+            if !CGPreflightScreenCaptureAccess() {
+                CGRequestScreenCaptureAccess()
+            }
             throw DisplayError.screenRecordingPermissionRequired
         }
 
@@ -121,8 +125,7 @@ final class ScreenRelay: NSObject, SCStreamDelegate {
         self.targetDisplayID = targetDisplayID
 
         // 4. Capture source portrait display
-        let content = try await SCShareableContent.current
-        guard let scDisplay = content.displays.first(where: { $0.displayID == sourceDisplayID }) else {
+        guard let scDisplay = await Self.findSCDisplay(for: sourceDisplayID) else {
             throw RelayError.sourceDisplayNotFound
         }
 
@@ -155,7 +158,7 @@ final class ScreenRelay: NSObject, SCStreamDelegate {
         let renderer = RelayRenderer(metalLayer: metalLayer, ciContext: ciContext, orientation: orientation)
         self.renderer = renderer
 
-        // Observe screen changes to immediately hide if display is detached or reconfigured
+        // Observe screen changes to handle resolution or display origin updates
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(screenParametersDidChange),
@@ -188,12 +191,14 @@ final class ScreenRelay: NSObject, SCStreamDelegate {
 
     @objc private func screenParametersDidChange() {
         guard let window = self.window, let targetID = self.targetDisplayID else { return }
-        guard let currentScreen = window.screen,
-              let num = currentScreen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
-              CGDirectDisplayID(num.uint32Value) == targetID else {
-            NSLog("[ScreenRelay] Relay window is no longer on target display %u. Ordering out to protect main screen.", targetID)
-            window.orderOut(nil)
-            return
+        Task { @MainActor in
+            if let targetScreen = await Self.findScreen(for: targetID, timeout: 1.0) {
+                window.setFrame(targetScreen.frame, display: true)
+                window.orderFront(nil)
+            } else {
+                NSLog("[ScreenRelay] Target display %u is no longer present. Ordering out.", targetID)
+                window.orderOut(nil)
+            }
         }
     }
 
@@ -214,7 +219,19 @@ final class ScreenRelay: NSObject, SCStreamDelegate {
 
     // MARK: - Helper
 
-    private static func findScreen(for displayID: CGDirectDisplayID, timeout: TimeInterval = 4.0) async -> NSScreen? {
+    private static func findSCDisplay(for displayID: CGDirectDisplayID, timeout: TimeInterval = 10.0) async -> SCDisplay? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let content = try? await SCShareableContent.current,
+               let scDisplay = content.displays.first(where: { $0.displayID == displayID }) {
+                return scDisplay
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return nil
+    }
+
+    private static func findScreen(for displayID: CGDirectDisplayID, timeout: TimeInterval = 10.0) async -> NSScreen? {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if let screen = NSScreen.screens.first(where: {

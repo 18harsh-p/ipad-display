@@ -22,7 +22,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// Creates a virtual display with exactly one mode.
 /// With `hiDPI` the single mode is (pixelWidth/2 x pixelHeight/2) points backed by
 /// pixelWidth x pixelHeight pixels ("Retina"); without it the mode is 1x.
-/// Releasing the returned object removes the display.
+/// Releasing or destroying the returned object removes the display.
 + (nullable instancetype)makeWithName:(NSString *)name
                            pixelWidth:(NSUInteger)pixelWidth
                           pixelHeight:(NSUInteger)pixelHeight
@@ -31,6 +31,9 @@ NS_ASSUME_NONNULL_BEGIN
                                serial:(uint32_t)serial
                                 error:(NSError **)error
     NS_SWIFT_NAME(make(name:pixelWidth:pixelHeight:refreshRate:hiDPI:serial:));
+
+/// Explicitly tears down the underlying virtual display immediately.
+- (void)destroy;
 
 @end
 

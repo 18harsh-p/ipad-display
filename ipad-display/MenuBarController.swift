@@ -5,7 +5,7 @@
 //
 // Design rules:
 //  * The menu never talks to Sunshine or CoreGraphics directly. It edits
-//    `DisplaySettings` and hands them to a `StreamBackend`.
+//    `DisplaySettings` and hands them to a `StreamBackend`..
 //  * Changing orientation, size or refresh rate DESTROYS and RECREATES the virtual
 //    display instead of switching modes. Switching the mode of a live private-API
 //    virtual display can leave it impossible to remove.
@@ -19,32 +19,32 @@ import ServiceManagement
 // MARK: - Model
 
 enum Orientation: String, Codable, CaseIterable {
-    case landscape
     case portrait
+    case landscape
 
     var title: String {
         switch self {
-        case .landscape: return "Landscape"
         case .portrait: return "Portrait"
+        case .landscape: return "Landscape"
         }
     }
 }
 
 enum PortraitRotation: String, Codable, CaseIterable {
-    case portDown
     case portUp
+    case portDown
 
     var title: String {
         switch self {
-        case .portDown: return "Portrait (Port Down)"
         case .portUp: return "Portrait (Port Up)"
+        case .portDown: return "Portrait (Port Down)"
         }
     }
 
     var exifOrientation: CGImagePropertyOrientation {
         switch self {
-        case .portDown: return .left   // 270° CCW: holding iPad upright with port at bottom presents upright screen
         case .portUp: return .right    // 90° CW: holding iPad upright with port at top presents upright screen
+        case .portDown: return .left   // 270° CCW: holding iPad upright with port at bottom presents upright screen
         }
     }
 }
@@ -63,8 +63,8 @@ struct SizePreset: Codable, Equatable {
 }
 
 struct DisplaySettings: Codable, Equatable {
-    var orientation: Orientation = .landscape
-    var portraitRotation: PortraitRotation = .portDown
+    var orientation: Orientation = .portrait
+    var portraitRotation: PortraitRotation = .portUp
     var sizeIndex: Int = 0
     var refreshRate: Int = 60
     var hiDPI: Bool = true   // "Retina": text is drawn at double density, so a 2048x1536 iPad looks like 1024x768
@@ -80,15 +80,12 @@ struct DisplaySettings: Codable, Equatable {
         }
     }
 
-    private static let key = "displaySettings.v1"
+    private static let key = "displaySettings.v3"
 
     static func load() -> DisplaySettings {
         guard let data = UserDefaults.standard.data(forKey: key),
               var decoded = try? JSONDecoder().decode(DisplaySettings.self, from: data)
         else { return DisplaySettings() }
-        if decoded.orientation == .portrait && !CGPreflightScreenCaptureAccess() {
-            decoded.orientation = .landscape
-        }
         return decoded
     }
 
@@ -135,6 +132,9 @@ protocol StreamBackend: AnyObject {
 
     /// Finish pairing a Moonlight client with the PIN it is showing.
     func pair(pin: String, deviceName: String, completion: @escaping (Result<Void, Error>) -> Void)
+
+    /// Removes all paired clients and certificates from Sunshine.
+    func unpairAll(completion: @escaping (Result<Void, Error>) -> Void)
 }
 
 // MARK: - Menu
@@ -150,7 +150,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         super.init()
 
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "ipad.landscape", accessibilityDescription: "iPad display")
+            button.image = NSImage(systemSymbolName: "ipad", accessibilityDescription: "iPad display")
         }
         let menu = NSMenu()
         menu.delegate = self
@@ -182,14 +182,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let orientationItem = NSMenuItem(title: "Orientation", action: nil, keyEquivalent: "")
         let orientationMenu = NSMenu()
 
-        let landscapeItem = NSMenuItem(title: "Landscape", action: #selector(pickOrientationLandscape), keyEquivalent: "")
-        landscapeItem.target = self
-        landscapeItem.state = settings.orientation == .landscape ? .on : .off
-        landscapeItem.isEnabled = !isApplying
-        orientationMenu.addItem(landscapeItem)
-
-        orientationMenu.addItem(.separator())
-
         for rotation in PortraitRotation.allCases {
             let item = NSMenuItem(title: rotation.title, action: #selector(pickPortraitRotation(_:)), keyEquivalent: "")
             item.target = self
@@ -199,16 +191,19 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             orientationMenu.addItem(item)
         }
 
+        orientationMenu.addItem(.separator())
+
+        let landscapeItem = NSMenuItem(title: "Landscape", action: #selector(pickOrientationLandscape), keyEquivalent: "")
+        landscapeItem.target = self
+        landscapeItem.state = settings.orientation == .landscape ? .on : .off
+        landscapeItem.isEnabled = !isApplying
+        orientationMenu.addItem(landscapeItem)
+
         orientationItem.submenu = orientationMenu
         menu.addItem(orientationItem)
 
-        let quick = NSMenuItem(title: "Rotate (switch orientation)", action: #selector(toggleOrientation), keyEquivalent: "r")
-        quick.target = self
-        quick.isEnabled = !isApplying
-        menu.addItem(quick)
-
-        // Size
-        let sizeItem = NSMenuItem(title: "Size", action: nil, keyEquivalent: "")
+        // Preset sizes
+        let sizeItem = NSMenuItem(title: "Resolution", action: nil, keyEquivalent: "")
         let sizeMenu = NSMenu()
         for (index, preset) in SizePreset.all.enumerated() {
             let item = NSMenuItem(title: preset.name, action: #selector(pickSize(_:)), keyEquivalent: "")
@@ -222,9 +217,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(sizeItem)
 
         // Refresh rate
-        let rateItem = NSMenuItem(title: "Refresh rate", action: nil, keyEquivalent: "")
+        let rateItem = NSMenuItem(title: "Refresh Rate", action: nil, keyEquivalent: "")
         let rateMenu = NSMenu()
-        for rate in [30, 60] {
+        for rate in [60, 30] {
             let item = NSMenuItem(title: "\(rate) Hz", action: #selector(pickRate(_:)), keyEquivalent: "")
             item.target = self
             item.tag = rate
@@ -235,13 +230,30 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         rateItem.submenu = rateMenu
         menu.addItem(rateItem)
 
-        let sharp = NSMenuItem(title: "Sharp text (HiDPI)", action: #selector(toggleHiDPI), keyEquivalent: "")
+        // HiDPI toggle
+        let sharp = NSMenuItem(title: "Retina (2×)", action: #selector(toggleHiDPI), keyEquivalent: "")
         sharp.target = self
         sharp.state = settings.hiDPI ? .on : .off
         sharp.isEnabled = !isApplying
         menu.addItem(sharp)
 
         menu.addItem(.separator())
+
+        // Moonlight Host IPs (shows active network addresses for easy connection)
+        let ips = Self.activeIPAddresses()
+        if !ips.isEmpty {
+            let hostItem = NSMenuItem(title: "Moonlight Host IP", action: nil, keyEquivalent: "")
+            let hostMenu = NSMenu()
+            for (label, ip) in ips {
+                let item = NSMenuItem(title: "\(label): \(ip)", action: #selector(copyIPAddress(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = ip
+                item.toolTip = "Click to copy IP address"
+                hostMenu.addItem(item)
+            }
+            hostItem.submenu = hostMenu
+            menu.addItem(hostItem)
+        }
 
         let restart = NSMenuItem(title: "Restart display", action: #selector(restartDisplay), keyEquivalent: "")
         restart.target = self
@@ -251,6 +263,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let pair = NSMenuItem(title: "Pair new iPad…", action: #selector(pairDevice), keyEquivalent: "")
         pair.target = self
         menu.addItem(pair)
+
+        let unpair = NSMenuItem(title: "Unpair all iPads…", action: #selector(unpairAllDevices), keyEquivalent: "")
+        unpair.target = self
+        menu.addItem(unpair)
 
         menu.addItem(.separator())
 
@@ -316,6 +332,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         apply(settings)
     }
 
+    @objc private func copyIPAddress(_ sender: NSMenuItem) {
+        guard let ip = sender.representedObject as? String else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(ip, forType: .string)
+    }
+
     @objc private func pairDevice() {
         let alert = NSAlert()
         alert.messageText = "Pair new iPad"
@@ -335,6 +357,30 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
         backend.pair(pin: pin, deviceName: "iPad") { [weak self] result in
             if case .failure(let error) = result { self?.showError("Pairing failed: \(error.localizedDescription)") }
+        }
+    }
+
+    @objc private func unpairAllDevices() {
+        let alert = NSAlert()
+        alert.messageText = "Unpair all iPads?"
+        alert.informativeText = "This removes all saved pairing credentials. You will need to delete this Mac from Moonlight on your iPad and pair again with a new PIN."
+        alert.addButton(withTitle: "Unpair")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        backend.unpairAll { [weak self] result in
+            switch result {
+            case .success:
+                let done = NSAlert()
+                done.messageText = "Unpaired successfully"
+                done.informativeText = "On your iPad, delete this Mac from Moonlight, tap it again to get a new PIN, and click 'Pair new iPad…' here."
+                NSApp.activate(ignoringOtherApps: true)
+                done.runModal()
+            case .failure(let error):
+                self?.showError("Failed to unpair: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -405,5 +451,37 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             NSApp.activate(ignoringOtherApps: true)
             alert.runModal()
         }
+    }
+
+    // MARK: - Helpers
+
+    static func activeIPAddresses() -> [(label: String, ip: String)] {
+        var results: [(String, String)] = []
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return results }
+        defer { freeifaddrs(ifaddr) }
+
+        var ptr: UnsafeMutablePointer<ifaddrs>? = first
+        while let current = ptr {
+            let flags = Int32(current.pointee.ifa_flags)
+            let isUp = (flags & IFF_UP) != 0
+            let isLoopback = (flags & IFF_LOOPBACK) != 0
+            if isUp && !isLoopback, let addr = current.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) {
+                var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                if getnameinfo(addr, socklen_t(addr.pointee.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
+                    let name = String(cString: current.pointee.ifa_name)
+                    let ip = String(cString: hostname)
+                    let label: String
+                    if ip.hasPrefix("169.254.") {
+                        label = "USB Cable (\(name))"
+                    } else {
+                        label = "Wi-Fi (\(name))"
+                    }
+                    results.append((label, ip))
+                }
+            }
+            ptr = current.pointee.ifa_next
+        }
+        return results
     }
 }

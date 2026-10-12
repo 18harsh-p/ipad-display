@@ -30,6 +30,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        backend?.stop()
+        return .terminateNow
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         backend?.stop()  // removes the virtual display and stops Sunshine; safe if already stopped
     }
