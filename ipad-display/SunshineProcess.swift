@@ -13,7 +13,7 @@
 import Foundation
 import SystemConfiguration
 
-enum SunshineError: LocalizedError {
+nonisolated enum SunshineError: LocalizedError, Sendable {
     case binaryNotFound
     case credentialSetupFailed
     case startFailed(String)
@@ -39,25 +39,25 @@ enum SunshineError: LocalizedError {
     }
 }
 
-enum SunshineEvent {
+nonisolated enum SunshineEvent: Sendable {
     case ready(port: Int)
     case clientConnected
     case clientDisconnected
     case exited(status: Int32)
 }
 
-struct Pairing: Decodable {
+nonisolated struct Pairing: Decodable, Sendable {
     let id: String
     let name: String
 }
 
-private struct Login: Codable {
+private nonisolated struct Login: Codable, Sendable {
     let username: String
     let password: String
 }
 
-final class SunshineProcess {
-    struct SunshinePaths {
+nonisolated final class SunshineProcess: @unchecked Sendable {
+    struct SunshinePaths: Sendable {
         let root: URL
         var config: URL { root.appendingPathComponent("sunshine.conf") }
         var state: URL { root.appendingPathComponent("sunshine_state.json") }
@@ -70,13 +70,13 @@ final class SunshineProcess {
         var pid: URL { root.appendingPathComponent("sunshine.pid") }
     }
 
-    var onEvent: ((SunshineEvent) -> Void)?
+    var onEvent: (@Sendable (SunshineEvent) -> Void)?
 
     private let paths: SunshinePaths
     private let executable: URL
     private let lock = NSLock()
     private let readySignal = DispatchSemaphore(value: 0)
-    private lazy var session = URLSession(configuration: .ephemeral, delegate: LocalTrustDelegate(), delegateQueue: nil)
+    private let session = URLSession(configuration: .ephemeral, delegate: LocalTrustDelegate(), delegateQueue: nil)
 
     // Guarded by `lock`.
     private var process: Process?
@@ -419,15 +419,15 @@ final class SunshineProcess {
     // MARK: - Pairing through Sunshine's local API
 
     func pendingPairings() async throws -> [Pairing] {
-        struct Response: Decodable { let pairings: [Pairing] }
+        nonisolated struct Response: Decodable { let pairings: [Pairing] }
         let data = try await request(path: "/api/pin", method: "GET", body: nil, timeout: 10)
         return try JSONDecoder().decode(Response.self, from: data).pairings
     }
 
     /// Blocks (up to about a minute) while Moonlight finishes its side of the handshake.
     func submitPIN(pairingID: String, pin: String, name: String) async throws -> Bool {
-        struct Body: Encodable { let pairing_id: String; let pin: String; let name: String }
-        struct Response: Decodable { let status: Bool }
+        nonisolated struct Body: Encodable { let pairing_id: String; let pin: String; let name: String }
+        nonisolated struct Response: Decodable { let status: Bool }
         let body = try JSONEncoder().encode(Body(pairing_id: pairingID, pin: pin, name: name))
         let data = try await request(path: "/api/pin", method: "POST", body: body, timeout: 70)
         let success = try JSONDecoder().decode(Response.self, from: data).status
@@ -477,7 +477,7 @@ final class SunshineProcess {
 
 /// Sunshine's API uses a self-signed certificate. Trust is granted only for this Mac's own
 /// loopback address, never for any other host.
-private final class LocalTrustDelegate: NSObject, URLSessionDelegate {
+private final class LocalTrustDelegate: NSObject, URLSessionDelegate, Sendable {
     func urlSession(
         _ session: URLSession,
         didReceive challenge: URLAuthenticationChallenge,

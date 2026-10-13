@@ -27,7 +27,11 @@ final class DisplayStreamBackend: StreamBackend {
 
     init(sunshine: SunshineProcess) {
         self.sunshine = sunshine
-        sunshine.onEvent = { [weak self] event in self?.handle(event) }
+        sunshine.onEvent = { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.handle(event)
+            }
+        }
     }
 
     // MARK: - StreamBackend

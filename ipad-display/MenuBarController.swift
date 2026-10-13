@@ -84,7 +84,7 @@ struct DisplaySettings: Codable, Equatable {
 
     static func load() -> DisplaySettings {
         guard let data = UserDefaults.standard.data(forKey: key),
-              var decoded = try? JSONDecoder().decode(DisplaySettings.self, from: data)
+              let decoded = try? JSONDecoder().decode(DisplaySettings.self, from: data)
         else { return DisplaySettings() }
         return decoded
     }
