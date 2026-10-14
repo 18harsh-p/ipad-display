@@ -51,11 +51,31 @@ final class RelayRenderer: NSObject, SCStreamOutput, @unchecked Sendable {
         guard let drawable = metalLayer.nextDrawable() else { return }
 
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let orientedImage = ciImage.oriented(orientation)
+        var orientedImage = ciImage.oriented(orientation)
+
+        // Normalize origin so the image coordinates start at (0, 0)
+        if orientedImage.extent.origin != .zero {
+            orientedImage = orientedImage.transformed(by: CGAffineTransform(
+                translationX: -orientedImage.extent.origin.x,
+                y: -orientedImage.extent.origin.y
+            ))
+        }
+
+        // Guarantee that the oriented image scales exactly to fill the destination drawable,
+        // avoiding any 1/4 area or partial black screen issues if buffer dimensions differ.
+        let targetWidth = metalLayer.drawableSize.width
+        let targetHeight = metalLayer.drawableSize.height
+        if orientedImage.extent.width > 0 && orientedImage.extent.height > 0 {
+            let scaleX = targetWidth / orientedImage.extent.width
+            let scaleY = targetHeight / orientedImage.extent.height
+            if scaleX != 1.0 || scaleY != 1.0 {
+                orientedImage = orientedImage.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+            }
+        }
 
         let destination = CIRenderDestination(
-            width: Int(metalLayer.drawableSize.width),
-            height: Int(metalLayer.drawableSize.height),
+            width: Int(targetWidth),
+            height: Int(targetHeight),
             pixelFormat: metalLayer.pixelFormat,
             commandBuffer: nil
         ) { () -> MTLTexture in
@@ -129,7 +149,9 @@ final class ScreenRelay: NSObject, SCStreamDelegate {
             throw RelayError.sourceDisplayNotFound
         }
 
-        // 5. Create a borderless window strictly for the target display
+        // 5. Create a borderless window strictly for the target display.
+        // Use .screenSaver level so that the window covers the target display's menu bar
+        // and is never hidden when applications are minimized or "Show Desktop" is invoked.
         let window = NSWindow(
             contentRect: targetScreen.frame,
             styleMask: [.borderless],
@@ -137,15 +159,19 @@ final class ScreenRelay: NSObject, SCStreamDelegate {
             defer: false
         )
         window.setFrame(targetScreen.frame, display: true)
-        window.level = .normal
+        window.level = .screenSaver
+        window.canHide = false
         window.hidesOnDeactivate = false
-        window.collectionBehavior = [.fullScreenAuxiliary]
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         window.ignoresMouseEvents = true
-        window.isOpaque = false
-        window.backgroundColor = .clear
+        window.isOpaque = true
+        window.backgroundColor = .black
+        window.hasShadow = false
 
-        let metalView = NSView(frame: window.contentView?.bounds ?? targetScreen.frame)
+        let metalView = NSView(frame: window.contentView?.bounds ?? NSRect(origin: .zero, size: targetScreen.frame.size))
+        metalView.autoresizingMask = [.width, .height]
         metalView.wantsLayer = true
+
         let metalLayer = CAMetalLayer()
         metalLayer.device = device
         metalLayer.pixelFormat = .bgra8Unorm
@@ -153,6 +179,7 @@ final class ScreenRelay: NSObject, SCStreamDelegate {
         metalLayer.contentsScale = targetScreen.backingScaleFactor
         metalLayer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
         metalLayer.drawableSize = CGSize(width: width, height: height)
+        metalLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
         metalView.layer = metalLayer
         window.contentView = metalView
 
@@ -171,10 +198,15 @@ final class ScreenRelay: NSObject, SCStreamDelegate {
         do {
             let filter = SCContentFilter(display: scDisplay, excludingWindows: [])
             let config = SCStreamConfiguration()
-            let sourcePixelWidth = CGDisplayPixelsWide(sourceDisplayID)
-            let sourcePixelHeight = CGDisplayPixelsHigh(sourceDisplayID)
-            config.width = sourcePixelWidth > 0 ? sourcePixelWidth : height
-            config.height = sourcePixelHeight > 0 ? sourcePixelHeight : width
+
+            // Query actual physical pixel dimensions from CGDisplayMode rather than
+            // CGDisplayPixelsWide/High which return point dimensions on Retina/HiDPI displays.
+            let sourceMode = CGDisplayCopyDisplayMode(sourceDisplayID)
+            let sourcePixelWidth = (sourceMode?.pixelWidth ?? 0) > 0 ? sourceMode!.pixelWidth : height
+            let sourcePixelHeight = (sourceMode?.pixelHeight ?? 0) > 0 ? sourceMode!.pixelHeight : width
+
+            config.width = sourcePixelWidth
+            config.height = sourcePixelHeight
             config.captureResolution = .best
             config.scalesToFit = false
             config.colorSpaceName = CGColorSpace.sRGB
@@ -189,7 +221,7 @@ final class ScreenRelay: NSObject, SCStreamDelegate {
             self.stream = stream
 
             // Reveal window only after capture has started
-            window.orderFront(nil)
+            window.orderFrontRegardless()
         } catch {
             stop()
             throw error
@@ -201,7 +233,7 @@ final class ScreenRelay: NSObject, SCStreamDelegate {
         Task { @MainActor in
             if let targetScreen = await Self.findScreen(for: targetID, timeout: 1.0) {
                 window.setFrame(targetScreen.frame, display: true)
-                window.orderFront(nil)
+                window.orderFrontRegardless()
             } else {
                 NSLog("[ScreenRelay] Target display %u is no longer present. Ordering out.", targetID)
                 window.orderOut(nil)
