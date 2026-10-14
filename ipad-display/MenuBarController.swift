@@ -43,8 +43,8 @@ enum PortraitRotation: String, Codable, CaseIterable {
 
     var exifOrientation: CGImagePropertyOrientation {
         switch self {
-        case .portUp: return .right    // 90° CW: holding iPad upright with port at top presents upright screen
-        case .portDown: return .left   // 270° CCW: holding iPad upright with port at bottom presents upright screen
+        case .portUp: return .left     // 270° CCW: holding iPad upright with port at top presents upright screen
+        case .portDown: return .right  // 90° CW: holding iPad upright with port at bottom presents upright screen
         }
     }
 }
@@ -80,7 +80,7 @@ struct DisplaySettings: Codable, Equatable {
         }
     }
 
-    private static let key = "displaySettings.v3"
+    private static let key = "displaySettings.v4"
 
     static func load() -> DisplaySettings {
         guard let data = UserDefaults.standard.data(forKey: key),

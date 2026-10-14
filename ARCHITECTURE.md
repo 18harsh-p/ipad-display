@@ -90,8 +90,8 @@ iPad Display consists of five cooperating subsystems orchestrated around a stric
   2. `ScreenCaptureKit` (`SCStream`) captures frames from `iPad Desktop`.
   3. `RelayRenderer` receives `CMSampleBuffer`s on a dedicated interactive dispatch queue.
   4. CoreImage transforms the frame with `CIImage.oriented(...)` using Metal shaders:
-     - `portDown`: `.left` (270° CCW rotation)
-     - `portUp`: `.right` (90° CW rotation)
+     - `portDown`: `.right` (90° CW rotation)
+     - `portUp`: `.left` (270° CCW rotation)
   5. The oriented buffer is written to a `CAMetalLayer` hosted inside a borderless, transparent `NSWindow` mapped precisely to `iPad Stream`.
   6. Sunshine captures `iPad Stream` directly and encodes it through VideoToolbox.
 - **Safety Measures**:
