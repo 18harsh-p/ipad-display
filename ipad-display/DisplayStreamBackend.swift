@@ -24,6 +24,8 @@ final class DisplayStreamBackend: StreamBackend {
     private let stateLock = NSLock()
     private var currentState: StreamState = .stopped
     private var currentTask: Task<Void, Never>?
+    private var appliedSettings: DisplaySettings?
+    private var activeCaptureDisplayID: CGDirectDisplayID?
 
     init(sunshine: SunshineProcess) {
         self.sunshine = sunshine
@@ -39,7 +41,44 @@ final class DisplayStreamBackend: StreamBackend {
     func apply(_ settings: DisplaySettings, completion: @escaping (Result<Void, Error>) -> Void) {
         currentTask?.cancel()
         currentTask = Task {
-            NSLog("[Backend] apply called: orientation=%@, preset=%@, refreshRate=%d, hiDPI=%d", settings.orientation.rawValue, settings.preset.name, settings.refreshRate, settings.hiDPI ? 1 : 0)
+            NSLog("[Backend] apply called: orientation=%@, preset=%@, refreshRate=%d, hiDPI=%d, streamAudio=%d",
+                  settings.orientation.rawValue, settings.preset.name, settings.refreshRate, settings.hiDPI ? 1 : 0, settings.streamAudio ? 1 : 0)
+
+            // Fast path: if only streamAudio changed and displays are already up, simply restart Sunshine
+            let canFastRestartSunshine: Bool = {
+                guard let currentID = self.activeCaptureDisplayID,
+                      let prev = self.appliedSettings else { return false }
+                let isCurrentStateActive: Bool
+                switch self.state {
+                case .waitingForClient, .streaming:
+                    isCurrentStateActive = true
+                default:
+                    isCurrentStateActive = false
+                }
+                guard isCurrentStateActive else { return false }
+                return prev.orientation == settings.orientation &&
+                       prev.portraitRotation == settings.portraitRotation &&
+                       prev.sizeIndex == settings.sizeIndex &&
+                       prev.refreshRate == settings.refreshRate &&
+                       prev.hiDPI == settings.hiDPI &&
+                       prev.streamAudio != settings.streamAudio
+            }()
+
+            if canFastRestartSunshine, let currentID = self.activeCaptureDisplayID {
+                NSLog("[Backend] Fast restart: only streamAudio changed. Restarting Sunshine (streamAudio=%d)...", settings.streamAudio ? 1 : 0)
+                setState(.starting)
+                do {
+                    self.sunshine.stop()
+                    try self.sunshine.start(displayID: currentID, streamAudio: settings.streamAudio)
+                    self.appliedSettings = settings
+                    self.setState(.waitingForClient)
+                    await MainActor.run { completion(.success(())) }
+                    return
+                } catch {
+                    NSLog("[Backend] Fast audio restart failed (%@), falling back to full display recreate", error.localizedDescription)
+                }
+            }
+
             setState(.starting)
             let result: Result<Void, Error>
             do {
@@ -105,10 +144,12 @@ final class DisplayStreamBackend: StreamBackend {
                     return
                 }
 
-                NSLog("[Backend] Starting Sunshine for display ID: %u", captureDisplayID)
-                try sunshine.start(displayID: captureDisplayID)
+                NSLog("[Backend] Starting Sunshine for display ID: %u, streamAudio: %d", captureDisplayID, settings.streamAudio ? 1 : 0)
+                try sunshine.start(displayID: captureDisplayID, streamAudio: settings.streamAudio)
                 NSLog("[Backend] Sunshine started successfully")
 
+                activeCaptureDisplayID = captureDisplayID
+                appliedSettings = settings
                 setState(.waitingForClient)
                 result = .success(())
             } catch {
@@ -116,6 +157,8 @@ final class DisplayStreamBackend: StreamBackend {
                 self.relay?.stop()
                 self.relay = nil
                 try? await displays.destroy()
+                activeCaptureDisplayID = nil
+                appliedSettings = nil
                 setState(.failed(error.localizedDescription))
                 result = .failure(error)
             }
@@ -139,6 +182,8 @@ final class DisplayStreamBackend: StreamBackend {
                 self.relay = nil
             }
         }
+        activeCaptureDisplayID = nil
+        appliedSettings = nil
         displays.destroySync()
         setState(.stopped)
     }

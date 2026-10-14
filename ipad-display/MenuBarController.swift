@@ -62,12 +62,43 @@ struct SizePreset: Codable, Equatable {
     ]
 }
 
-struct DisplaySettings: Codable, Equatable {
+struct DisplaySettings: Codable, Equatable, Sendable {
     var orientation: Orientation = .portrait
     var portraitRotation: PortraitRotation = .portUp
     var sizeIndex: Int = 0
     var refreshRate: Int = 60
     var hiDPI: Bool = true   // "Retina": text is drawn at double density, so a 2048x1536 iPad looks like 1024x768
+    var streamAudio: Bool = false // false = Mac only (blocked); true = Mac + iPad (dual audio)
+
+    enum CodingKeys: String, CodingKey {
+        case orientation, portraitRotation, sizeIndex, refreshRate, hiDPI, streamAudio
+    }
+
+    init(
+        orientation: Orientation = .portrait,
+        portraitRotation: PortraitRotation = .portUp,
+        sizeIndex: Int = 0,
+        refreshRate: Int = 60,
+        hiDPI: Bool = true,
+        streamAudio: Bool = false
+    ) {
+        self.orientation = orientation
+        self.portraitRotation = portraitRotation
+        self.sizeIndex = sizeIndex
+        self.refreshRate = refreshRate
+        self.hiDPI = hiDPI
+        self.streamAudio = streamAudio
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.orientation = try container.decodeIfPresent(Orientation.self, forKey: .orientation) ?? .portrait
+        self.portraitRotation = try container.decodeIfPresent(PortraitRotation.self, forKey: .portraitRotation) ?? .portUp
+        self.sizeIndex = try container.decodeIfPresent(Int.self, forKey: .sizeIndex) ?? 0
+        self.refreshRate = try container.decodeIfPresent(Int.self, forKey: .refreshRate) ?? 60
+        self.hiDPI = try container.decodeIfPresent(Bool.self, forKey: .hiDPI) ?? true
+        self.streamAudio = try container.decodeIfPresent(Bool.self, forKey: .streamAudio) ?? false
+    }
 
     var preset: SizePreset { SizePreset.all[min(max(sizeIndex, 0), SizePreset.all.count - 1)] }
 
@@ -237,6 +268,33 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         sharp.isEnabled = !isApplying
         menu.addItem(sharp)
 
+        // Audio submenu
+        let audioItem = NSMenuItem(title: "Audio", action: nil, keyEquivalent: "")
+        let audioMenu = NSMenu()
+
+        let macOnlyItem = NSMenuItem(title: "Mac Only (Blocked)", action: #selector(pickAudioMacOnly), keyEquivalent: "")
+        macOnlyItem.target = self
+        macOnlyItem.state = !settings.streamAudio ? .on : .off
+        macOnlyItem.isEnabled = !isApplying
+        macOnlyItem.toolTip = "Audio plays only on Mac. Streaming to iPad is blocked to ensure zero interruptions."
+        audioMenu.addItem(macOnlyItem)
+
+        let dualAudioItem = NSMenuItem(title: "Mac + iPad (Dual Audio)", action: #selector(pickAudioDual), keyEquivalent: "")
+        dualAudioItem.target = self
+        dualAudioItem.state = settings.streamAudio ? .on : .off
+        dualAudioItem.isEnabled = !isApplying
+        dualAudioItem.toolTip = "Stream audio to iPad while keeping Mac speakers active for louder sound."
+        audioMenu.addItem(dualAudioItem)
+
+        audioMenu.addItem(.separator())
+
+        let tipItem = NSMenuItem(title: "Tip: in Moonlight, turn on \"Play audio on host PC\"", action: nil, keyEquivalent: "")
+        tipItem.isEnabled = false
+        audioMenu.addItem(tipItem)
+
+        audioItem.submenu = audioMenu
+        menu.addItem(audioItem)
+
         menu.addItem(.separator())
 
         // Moonlight Host IPs (shows active network addresses for easy connection)
@@ -326,6 +384,25 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func toggleHiDPI() {
         change { $0.hiDPI.toggle() }
+    }
+
+    @objc private func pickAudioMacOnly() {
+        change { $0.streamAudio = false }
+    }
+
+    @objc private func pickAudioDual() {
+        let defaultsKey = "hasShownDualAudioNotice"
+        if !UserDefaults.standard.bool(forKey: defaultsKey) {
+            UserDefaults.standard.set(true, forKey: defaultsKey)
+            let alert = NSAlert()
+            alert.messageText = "Dual Audio Enabled"
+            alert.informativeText = "Audio is now streaming to your iPad.\n\nTo hear sound from both your Mac and iPad simultaneously, open Moonlight on your iPad, go to Settings ⚙ > Audio, and make sure \"Play audio on host PC\" is turned ON."
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "Got it")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        }
+        change { $0.streamAudio = true }
     }
 
     @objc private func restartDisplay() {

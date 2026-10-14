@@ -36,6 +36,7 @@ The result?
 - **One-Click Pairing**: Pair your iPad directly through the menu bar by typing the 4-digit PIN shown on Moonlight—no web browser or command-line setup required.
 - **Conflict-Free Sunshine Isolation**: Runs Sunshine in an independent sandbox (`~/.config/ipad-display`) with an ephemeral random local API key, coexisting peacefully with any global Sunshine installation.
 - **Crash-Resilient Display Management**: Encodes display resolutions, refresh rates, and an incrementing generation counter into virtual display serial numbers to prevent macOS `WindowServer` state confusion.
+- **Dual Audio & Interruption-Free Audio Modes**: Menu bar audio controls allow switching between **Mac Only (Blocked)** (Sunshine's audio tap is disabled, completely safeguarding Mac audio from interruption or muting) and **Mac + iPad (Dual Audio)** (streams audio to the iPad while keeping host Mac speakers active, outputting sound simultaneously from both devices for amplified loudness).
 
 ---
 

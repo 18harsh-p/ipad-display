@@ -132,11 +132,11 @@ nonisolated final class SunshineProcess: @unchecked Sendable {
     // MARK: - Start and stop
 
     /// Writes the config, starts Sunshine for the given display and blocks until it reports ready.
-    func start(displayID: CGDirectDisplayID) throws {
+    func start(displayID: CGDirectDisplayID, streamAudio: Bool = false) throws {
         stop()
         reapStaleProcess()
 
-        try writeConfig(displayID: displayID)
+        try writeConfig(displayID: displayID, streamAudio: streamAudio)
         sanitizeStateFile()
         _ = try ensureLogin()
 
@@ -288,9 +288,10 @@ nonisolated final class SunshineProcess: @unchecked Sendable {
         return false
     }
 
-    private func writeConfig(displayID: CGDirectDisplayID) throws {
+    private func writeConfig(displayID: CGDirectDisplayID, streamAudio: Bool) throws {
         try FileManager.default.createDirectory(at: paths.root, withIntermediateDirectories: true)
 
+        let audioSetting = streamAudio ? "enabled" : "disabled"
         let config = """
         output_name = \(displayID)
         min_log_level = info
@@ -300,7 +301,7 @@ nonisolated final class SunshineProcess: @unchecked Sendable {
         resolutions = [2048x1536, 1536x2048, 1600x1200, 1200x1600, 1024x768, 768x1024]
         fps = [30, 60]
         vt_software = allowed
-        stream_audio = disabled
+        stream_audio = \(audioSetting)
 
         file_state = \(paths.state.path)
         credentials_file = \(paths.credentials.path)
