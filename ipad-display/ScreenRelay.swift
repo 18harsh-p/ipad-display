@@ -150,6 +150,8 @@ final class ScreenRelay: NSObject, SCStreamDelegate {
         metalLayer.device = device
         metalLayer.pixelFormat = .bgra8Unorm
         metalLayer.framebufferOnly = false
+        metalLayer.contentsScale = targetScreen.backingScaleFactor
+        metalLayer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
         metalLayer.drawableSize = CGSize(width: width, height: height)
         metalView.layer = metalLayer
         window.contentView = metalView
@@ -169,8 +171,13 @@ final class ScreenRelay: NSObject, SCStreamDelegate {
         do {
             let filter = SCContentFilter(display: scDisplay, excludingWindows: [])
             let config = SCStreamConfiguration()
-            config.width = scDisplay.width
-            config.height = scDisplay.height
+            let sourcePixelWidth = CGDisplayPixelsWide(sourceDisplayID)
+            let sourcePixelHeight = CGDisplayPixelsHigh(sourceDisplayID)
+            config.width = sourcePixelWidth > 0 ? sourcePixelWidth : height
+            config.height = sourcePixelHeight > 0 ? sourcePixelHeight : width
+            config.captureResolution = .best
+            config.scalesToFit = false
+            config.colorSpaceName = CGColorSpace.sRGB
             config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(refreshRate))
             config.pixelFormat = kCVPixelFormatType_32BGRA
             config.showsCursor = true

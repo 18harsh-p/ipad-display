@@ -82,6 +82,7 @@ final class VirtualDisplayManager {
             try? await destroy()
             throw DisplayError.didNotAppear
         }
+        Self.configureDisplayMode(displayID: id, pixelWidth: width, pixelHeight: height, hiDPI: hiDPI)
         NSLog("[VirtualDisplayManager] Display ID %u is online and active", id)
         return id
     }
@@ -129,6 +130,9 @@ final class VirtualDisplayManager {
             try? await destroy()
             throw DisplayError.didNotAppear
         }
+
+        Self.configureDisplayMode(displayID: dID, pixelWidth: landscapeHeight, pixelHeight: landscapeWidth, hiDPI: hiDPI)
+        Self.configureDisplayMode(displayID: sID, pixelWidth: landscapeWidth, pixelHeight: landscapeHeight, hiDPI: false)
 
         return (desktopID: dID, streamID: sID)
     }
@@ -178,6 +182,45 @@ final class VirtualDisplayManager {
     }
 
     // MARK: - Helpers
+
+    /// Configures the display mode to ensure the requested resolution and HiDPI scaling are active.
+    static func configureDisplayMode(displayID: CGDirectDisplayID, pixelWidth: Int, pixelHeight: Int, hiDPI: Bool) {
+        let targetPointWidth = hiDPI ? pixelWidth / 2 : pixelWidth
+        let targetPointHeight = hiDPI ? pixelHeight / 2 : pixelHeight
+
+        let options = [kCGDisplayShowDuplicateLowResolutionModes: true] as CFDictionary
+        guard let modes = CGDisplayCopyAllDisplayModes(displayID, options) as? [CGDisplayMode] else {
+            NSLog("[VirtualDisplayManager] Could not get modes for display %u", displayID)
+            return
+        }
+
+        // 1. Look for the exact mode matching pixel dimensions and target point dimensions
+        for mode in modes {
+            if mode.pixelWidth == pixelWidth && mode.pixelHeight == pixelHeight &&
+               mode.width == targetPointWidth && mode.height == targetPointHeight {
+                NSLog("[VirtualDisplayManager] Setting display %u mode to %dx%d (pt: %dx%d, flags: 0x%x)",
+                      displayID, mode.pixelWidth, mode.pixelHeight, mode.width, mode.height, mode.ioFlags)
+                let err = CGDisplaySetDisplayMode(displayID, mode, nil)
+                if err != .success {
+                    NSLog("[VirtualDisplayManager] Failed to set display mode: %d", err.rawValue)
+                }
+                return
+            }
+        }
+
+        // 2. Fallback: match pixel dimensions
+        for mode in modes {
+            if mode.pixelWidth == pixelWidth && mode.pixelHeight == pixelHeight {
+                NSLog("[VirtualDisplayManager] Setting display %u fallback mode to %dx%d (pt: %dx%d)",
+                      displayID, mode.pixelWidth, mode.pixelHeight, mode.width, mode.height)
+                let err = CGDisplaySetDisplayMode(displayID, mode, nil)
+                if err != .success {
+                    NSLog("[VirtualDisplayManager] Failed to set fallback display mode: %d", err.rawValue)
+                }
+                return
+            }
+        }
+    }
 
     /// Verifies that the display is not only online but actively published in macOS active displays list,
     /// ensuring Sunshine/encoders can successfully open and stream it.

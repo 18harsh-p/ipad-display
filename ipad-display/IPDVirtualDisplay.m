@@ -79,7 +79,8 @@ static void IPDFail(NSError **error, NSInteger code, NSString *message) {
     descriptor.sizeInMillimeters = CGSizeMake(pixelWidth / 264.0 * 25.4, pixelHeight / 264.0 * 25.4);
     // macOS 14 and later want a non-zero vendor ID and a distinct serial per display identity.
     descriptor.vendorID = 0x4950;
-    descriptor.productID = 0x4944;
+    // Vary productID by serial and HiDPI mode so WindowServer does not apply stale resolution caches.
+    descriptor.productID = (unsigned int)((serial ^ (hiDPI ? 0xA5A5 : 0x5A5A)) & 0xFFFF);
     descriptor.serialNum = serial;
     if ([descriptor respondsToSelector:@selector(setDispatchQueue:)]) {
         [descriptor setDispatchQueue:dispatch_get_main_queue()];
@@ -91,16 +92,26 @@ static void IPDFail(NSError **error, NSInteger code, NSString *message) {
         return nil;
     }
 
-    // In Apple's private CGVirtualDisplay API, CGVirtualDisplayMode width and height
-    // are the physical pixel dimensions. When settings.hiDPI is enabled, macOS
-    // automatically provisions the 2x Retina logical point scaling. Passing halved dimensions
-    // creates an invalid mode configuration that causes WindowServer's GenerateModeListForDisplay
-    // to abort and crash the entire user session.
-    CGVirtualDisplayMode *mode = [[NSClassFromString(@"CGVirtualDisplayMode") alloc]
+    // In Apple's private CGVirtualDisplay API, WindowServer synthesizes 2x Retina modes
+    // when settings.hiDPI is enabled and the modes list includes the corresponding logical
+    // half-resolution along with the native backing framebuffer resolution.
+    NSMutableArray *modes = [NSMutableArray array];
+    CGVirtualDisplayMode *nativeMode = [[NSClassFromString(@"CGVirtualDisplayMode") alloc]
         initWithWidth:pixelWidth height:pixelHeight refreshRate:refreshRate];
+    if (nativeMode) {
+        [modes addObject:nativeMode];
+    }
+    if (hiDPI && pixelWidth >= 4 && pixelHeight >= 4) {
+        CGVirtualDisplayMode *retinaMode = [[NSClassFromString(@"CGVirtualDisplayMode") alloc]
+            initWithWidth:(pixelWidth / 2) height:(pixelHeight / 2) refreshRate:refreshRate];
+        if (retinaMode) {
+            [modes addObject:retinaMode];
+        }
+    }
+
     CGVirtualDisplaySettings *settings = [[NSClassFromString(@"CGVirtualDisplaySettings") alloc] init];
     settings.hiDPI = hiDPI ? 1 : 0;
-    settings.modes = @[mode];
+    settings.modes = modes;
 
     if (![display applySettings:settings]) {
         IPDFail(error, 4, @"macOS did not accept the display settings.");
