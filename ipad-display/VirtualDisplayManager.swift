@@ -194,31 +194,50 @@ final class VirtualDisplayManager {
             return
         }
 
+        var matchedMode: CGDisplayMode?
         // 1. Look for the exact mode matching pixel dimensions and target point dimensions
         for mode in modes {
             if mode.pixelWidth == pixelWidth && mode.pixelHeight == pixelHeight &&
                mode.width == targetPointWidth && mode.height == targetPointHeight {
-                NSLog("[VirtualDisplayManager] Setting display %u mode to %dx%d (pt: %dx%d, flags: 0x%x)",
-                      displayID, mode.pixelWidth, mode.pixelHeight, mode.width, mode.height, mode.ioFlags)
-                let err = CGDisplaySetDisplayMode(displayID, mode, nil)
-                if err != .success {
-                    NSLog("[VirtualDisplayManager] Failed to set display mode: %d", err.rawValue)
-                }
-                return
+                matchedMode = mode
+                break
             }
         }
 
         // 2. Fallback: match pixel dimensions
-        for mode in modes {
-            if mode.pixelWidth == pixelWidth && mode.pixelHeight == pixelHeight {
-                NSLog("[VirtualDisplayManager] Setting display %u fallback mode to %dx%d (pt: %dx%d)",
-                      displayID, mode.pixelWidth, mode.pixelHeight, mode.width, mode.height)
-                let err = CGDisplaySetDisplayMode(displayID, mode, nil)
-                if err != .success {
-                    NSLog("[VirtualDisplayManager] Failed to set fallback display mode: %d", err.rawValue)
+        if matchedMode == nil {
+            for mode in modes {
+                if mode.pixelWidth == pixelWidth && mode.pixelHeight == pixelHeight {
+                    matchedMode = mode
+                    break
                 }
-                return
             }
+        }
+
+        guard let targetMode = matchedMode else {
+            NSLog("[VirtualDisplayManager] Could not find suitable mode for display %u (%dx%d)", displayID, pixelWidth, pixelHeight)
+            return
+        }
+
+        var config: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&config) == .success, let config = config else {
+            NSLog("[VirtualDisplayManager] CGBeginDisplayConfiguration failed for display %u", displayID)
+            return
+        }
+
+        let configErr = CGConfigureDisplayWithDisplayMode(config, displayID, targetMode, nil)
+        if configErr != .success {
+            NSLog("[VirtualDisplayManager] CGConfigureDisplayWithDisplayMode failed: %d", configErr.rawValue)
+            CGCancelDisplayConfiguration(config)
+            return
+        }
+
+        let completeErr = CGCompleteDisplayConfiguration(config, .permanently)
+        if completeErr != .success {
+            NSLog("[VirtualDisplayManager] CGCompleteDisplayConfiguration failed: %d", completeErr.rawValue)
+        } else {
+            NSLog("[VirtualDisplayManager] Successfully committed mode for display %u: %dx%d (pt: %dx%d, flags: 0x%x)",
+                  displayID, targetMode.pixelWidth, targetMode.pixelHeight, targetMode.width, targetMode.height, targetMode.ioFlags)
         }
     }
 
