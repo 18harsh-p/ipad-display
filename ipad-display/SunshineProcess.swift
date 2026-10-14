@@ -95,6 +95,8 @@ nonisolated final class SunshineProcess: @unchecked Sendable {
             self.executable = URL(fileURLWithPath: override)  // handy while developing in Xcode
         } else if let bundled = Bundle.main.url(forAuxiliaryExecutable: "sunshine") {
             self.executable = bundled
+        } else if let patched = Self.preparePatchedSunshine(in: supportDirectory) {
+            self.executable = patched
         } else if let installed = [
             "/Applications/Sunshine.app/Contents/MacOS/Sunshine",
             "/Applications/Sunshine.app/Contents/MacOS/sunshine",
@@ -451,6 +453,65 @@ nonisolated final class SunshineProcess: @unchecked Sendable {
                 try? output.write(to: paths.state, options: .atomic)
             }
         }
+    }
+
+    private static func preparePatchedSunshine(in supportDirectory: URL) -> URL? {
+        let appBundle = supportDirectory.appendingPathComponent("Sunshine.app")
+        let binary = appBundle.appendingPathComponent("Contents/MacOS/Sunshine")
+        let fileManager = FileManager.default
+
+        if !fileManager.fileExists(atPath: binary.path) {
+            guard let sourceApp = [
+                "/Applications/Sunshine.app",
+                fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Applications/Sunshine.app").path
+            ].first(where: { fileManager.fileExists(atPath: $0) }) else {
+                return nil
+            }
+            try? fileManager.removeItem(at: appBundle)
+            do {
+                try fileManager.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
+                try fileManager.copyItem(at: URL(fileURLWithPath: sourceApp), to: appBundle)
+                let xattr = Process()
+                xattr.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
+                xattr.arguments = ["-cr", appBundle.path]
+                try? xattr.run()
+                xattr.waitUntilExit()
+            } catch {
+                return nil
+            }
+        }
+
+        // Apply dual-audio unmuting patches to ensure host Mac speakers are never muted when streaming
+        if let handle = try? FileHandle(forUpdating: binary) {
+            defer { try? handle.close() }
+            var modified = false
+            let patches: [(offset: UInt64, original: [UInt8], patched: [UInt8])] = [
+                // nvhttp::make_launch_session: force host_audio = true (mov w22, #1)
+                (0x7064c, [0xf6, 0x03, 0x00, 0xaa], [0x22, 0x00, 0x80, 0x52]),
+                // createSystemTapDescriptionForChannels: nop out cbz to muted tap branch
+                (0x1ad1b0, [0x80, 0x05, 0x00, 0x34], [0x1f, 0x20, 0x03, 0xd5]),
+                // createSystemTapDescriptionForChannels: force CATapUnmuted (0) instead of CATapMutedWhenTapped (1)
+                (0x1ad264, [0x22, 0x00, 0x80, 0x52], [0x02, 0x00, 0x80, 0x52])
+            ]
+            for patch in patches {
+                try? handle.seek(toOffset: patch.offset)
+                if let current = try? handle.read(upToCount: patch.original.count), current == Data(patch.original) {
+                    try? handle.seek(toOffset: patch.offset)
+                    try? handle.write(contentsOf: patch.patched)
+                    modified = true
+                }
+            }
+            if modified {
+                try? handle.synchronize()
+                let codesign = Process()
+                codesign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+                codesign.arguments = ["--force", "-s", "-", binary.path]
+                try? codesign.run()
+                codesign.waitUntilExit()
+            }
+        }
+
+        return fileManager.isExecutableFile(atPath: binary.path) ? binary : nil
     }
 
     private func request(path: String, method: String, body: Data?, timeout: TimeInterval) async throws -> Data {

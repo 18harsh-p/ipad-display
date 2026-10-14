@@ -130,6 +130,9 @@ Moonlight's iOS client enforces a landscape rendering viewport. When streaming a
 5. **Adjust on the Fly**:
    - Use the menu bar icon to toggle **Landscape**, **Portrait (Port Down)**, or **Portrait (Port Up)**.
    - Toggle **Sharp text (HiDPI)** or change the resolution preset at any time.
+   - Choose your audio preference under **Audio**:
+     - **Mac Only (Blocked)**: System audio never gets diverted to the iPad; plays solely through your Mac speakers.
+     - **Mac + iPad (Dual Audio)**: Streams audio to the iPad while playing through host Mac speakers simultaneously for maximum loudness.
 
 ---
 
