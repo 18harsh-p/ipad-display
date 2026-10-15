@@ -213,16 +213,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let orientationItem = NSMenuItem(title: "Orientation", action: nil, keyEquivalent: "")
         let orientationMenu = NSMenu()
 
-        for rotation in PortraitRotation.allCases {
-            let item = NSMenuItem(title: rotation.title, action: #selector(pickPortraitRotation(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = rotation.rawValue
-            item.state = (settings.orientation == .portrait && settings.portraitRotation == rotation) ? .on : .off
-            item.isEnabled = !isApplying
-            orientationMenu.addItem(item)
-        }
-
-        orientationMenu.addItem(.separator())
+        let portraitItem = NSMenuItem(title: "Portrait", action: #selector(pickOrientationPortrait), keyEquivalent: "")
+        portraitItem.target = self
+        portraitItem.state = settings.orientation == .portrait ? .on : .off
+        portraitItem.isEnabled = !isApplying
+        orientationMenu.addItem(portraitItem)
 
         let landscapeItem = NSMenuItem(title: "Landscape", action: #selector(pickOrientationLandscape), keyEquivalent: "")
         landscapeItem.target = self
@@ -268,52 +263,20 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         sharp.isEnabled = !isApplying
         menu.addItem(sharp)
 
-        // Audio submenu
-        let audioItem = NSMenuItem(title: "Audio", action: nil, keyEquivalent: "")
-        let audioMenu = NSMenu()
-
-        let macOnlyItem = NSMenuItem(title: "Mac Only (Blocked)", action: #selector(pickAudioMacOnly), keyEquivalent: "")
-        macOnlyItem.target = self
-        macOnlyItem.state = !settings.streamAudio ? .on : .off
-        macOnlyItem.isEnabled = !isApplying
-        macOnlyItem.toolTip = "Audio plays only on Mac. Streaming to iPad is blocked to ensure zero interruptions."
-        audioMenu.addItem(macOnlyItem)
-
-        let dualAudioItem = NSMenuItem(title: "Mac + iPad (Dual Audio)", action: #selector(pickAudioDual), keyEquivalent: "")
-        dualAudioItem.target = self
-        dualAudioItem.state = settings.streamAudio ? .on : .off
-        dualAudioItem.isEnabled = !isApplying
-        dualAudioItem.toolTip = "Stream audio to iPad while keeping Mac speakers active for louder sound."
-        audioMenu.addItem(dualAudioItem)
-
-        audioMenu.addItem(.separator())
-
-        let tipItem = NSMenuItem(title: "Tip: in Moonlight, turn on \"Play audio on host PC\"", action: nil, keyEquivalent: "")
-        tipItem.isEnabled = false
-        audioMenu.addItem(tipItem)
-
-        audioItem.submenu = audioMenu
-        menu.addItem(audioItem)
+        // Stream audio toggle
+        let audio = NSMenuItem(
+            title: "Dual Audio (Mac + iPad)",
+            action: #selector(toggleAudio),
+            keyEquivalent: ""
+        )
+        audio.target = self
+        audio.state = settings.streamAudio ? .on : .off
+        audio.isEnabled = !isApplying
+        menu.addItem(audio)
 
         menu.addItem(.separator())
 
-        // Moonlight Host IPs (shows active network addresses for easy connection)
-        let ips = Self.activeIPAddresses()
-        if !ips.isEmpty {
-            let hostItem = NSMenuItem(title: "Moonlight Host IP", action: nil, keyEquivalent: "")
-            let hostMenu = NSMenu()
-            for (label, ip) in ips {
-                let item = NSMenuItem(title: "\(label): \(ip)", action: #selector(copyIPAddress(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = ip
-                item.toolTip = "Click to copy IP address"
-                hostMenu.addItem(item)
-            }
-            hostItem.submenu = hostMenu
-            menu.addItem(hostItem)
-        }
-
-        let restart = NSMenuItem(title: "Restart display", action: #selector(restartDisplay), keyEquivalent: "")
+        let restart = NSMenuItem(title: "Restart display", action: #selector(restartDisplay), keyEquivalent: "r")
         restart.target = self
         restart.isEnabled = !isApplying
         menu.addItem(restart)
@@ -351,6 +314,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     // MARK: Actions
 
+    @objc private func pickOrientationPortrait() {
+        change { $0.orientation = .portrait }
+    }
+
     @objc private func pickOrientationLandscape() {
         change { $0.orientation = .landscape }
     }
@@ -375,88 +342,87 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func pickSize(_ sender: NSMenuItem) {
-        change { $0.sizeIndex = sender.tag }
+        let index = sender.tag
+        guard index >= 0 && index < SizePreset.all.count else { return }
+        change { $0.sizeIndex = index }
     }
 
     @objc private func pickRate(_ sender: NSMenuItem) {
-        change { $0.refreshRate = sender.tag }
+        let rate = sender.tag
+        guard rate == 30 || rate == 60 else { return }
+        change { $0.refreshRate = rate }
     }
 
     @objc private func toggleHiDPI() {
         change { $0.hiDPI.toggle() }
     }
 
-    @objc private func pickAudioMacOnly() {
-        change { $0.streamAudio = false }
-    }
-
-    @objc private func pickAudioDual() {
-        let defaultsKey = "hasShownDualAudioNotice"
-        if !UserDefaults.standard.bool(forKey: defaultsKey) {
-            UserDefaults.standard.set(true, forKey: defaultsKey)
-            let alert = NSAlert()
-            alert.messageText = "Dual Audio Enabled"
-            alert.informativeText = "Audio is now streaming to your iPad.\n\nTo hear sound from both your Mac and iPad simultaneously, open Moonlight on your iPad, go to Settings ⚙ > Audio, and make sure \"Play audio on host PC\" is turned ON."
-            alert.alertStyle = .informational
-            alert.addButton(withTitle: "Got it")
-            NSApp.activate(ignoringOtherApps: true)
-            alert.runModal()
-        }
-        change { $0.streamAudio = true }
+    @objc private func toggleAudio() {
+        change { $0.streamAudio.toggle() }
     }
 
     @objc private func restartDisplay() {
         apply(settings)
     }
 
-    @objc private func copyIPAddress(_ sender: NSMenuItem) {
-        guard let ip = sender.representedObject as? String else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(ip, forType: .string)
-    }
-
     @objc private func pairDevice() {
         let alert = NSAlert()
         alert.messageText = "Pair new iPad"
-        alert.informativeText = "Open Moonlight on the iPad, pick this Mac, and type the 4-digit PIN it shows."
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 160, height: 24))
-        field.placeholderString = "PIN"
-        alert.accessoryView = field
+        alert.informativeText = "Open Moonlight on the iPad, tap your Mac, and enter the 4-digit PIN shown on the iPad:"
+        alert.alertStyle = .informational
+
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 160, height: 24))
+        input.placeholderString = "0000"
+        alert.accessoryView = input
         alert.addButton(withTitle: "Pair")
         alert.addButton(withTitle: "Cancel")
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        let pin = field.stringValue.trimmingCharacters(in: .whitespaces)
-        guard pin.count == 4, pin.allSatisfy(\.isNumber) else {
-            showError("The PIN is 4 digits.")
-            return
-        }
-        backend.pair(pin: pin, deviceName: "iPad") { [weak self] result in
-            if case .failure(let error) = result { self?.showError("Pairing failed: \(error.localizedDescription)") }
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            let pin = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !pin.isEmpty else { return }
+            backend.pair(pin: pin, deviceName: "iPad") { result in
+                switch result {
+                case .success:
+                    let ok = NSAlert()
+                    ok.messageText = "Paired!"
+                    ok.informativeText = "The iPad is now paired. Tap the display on the iPad to start streaming."
+                    ok.runModal()
+                case .failure(let err):
+                    let fail = NSAlert()
+                    fail.alertStyle = .warning
+                    fail.messageText = "Pairing failed"
+                    fail.informativeText = err.localizedDescription
+                    fail.runModal()
+                }
+            }
         }
     }
 
     @objc private func unpairAllDevices() {
         let alert = NSAlert()
         alert.messageText = "Unpair all iPads?"
-        alert.informativeText = "This removes all saved pairing credentials. You will need to delete this Mac from Moonlight on your iPad and pair again with a new PIN."
-        alert.addButton(withTitle: "Unpair")
-        alert.addButton(withTitle: "Cancel")
+        alert.informativeText = "This will remove all paired Moonlight clients. You will need to enter a PIN again next time."
         alert.alertStyle = .warning
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        alert.addButton(withTitle: "Unpair all")
+        alert.addButton(withTitle: "Cancel")
 
-        backend.unpairAll { [weak self] result in
-            switch result {
-            case .success:
-                let done = NSAlert()
-                done.messageText = "Unpaired successfully"
-                done.informativeText = "On your iPad, delete this Mac from Moonlight, tap it again to get a new PIN, and click 'Pair new iPad…' here."
-                NSApp.activate(ignoringOtherApps: true)
-                done.runModal()
-            case .failure(let error):
-                self?.showError("Failed to unpair: \(error.localizedDescription)")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            backend.unpairAll { result in
+                switch result {
+                case .success:
+                    let ok = NSAlert()
+                    ok.messageText = "Unpaired"
+                    ok.informativeText = "All clients have been unpaired."
+                    ok.runModal()
+                case .failure(let err):
+                    let fail = NSAlert()
+                    fail.alertStyle = .warning
+                    fail.messageText = "Failed to unpair"
+                    fail.informativeText = err.localizedDescription
+                    fail.runModal()
+                }
             }
         }
     }
@@ -468,10 +434,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             } else {
                 try SMAppService.mainApp.register()
             }
+            rebuildMenu()
         } catch {
-            showError("Could not change the login setting: \(error.localizedDescription)")
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Login item change failed"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
         }
-        rebuildMenu()
     }
 
     @objc private func quitApp() {
@@ -479,35 +449,28 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         NSApp.terminate(nil)
     }
 
-    // MARK: Applying changes
-
-    /// Edit settings, save them and recreate the display. Ignored while a change is already running,
-    /// because overlapping create/destroy calls are a likely cause of stuck displays.
-    private func change(_ edit: (inout DisplaySettings) -> Void) {
-        guard !isApplying else { return }
-        var updated = settings
-        edit(&updated)
-        guard updated != settings else { return }
-        apply(updated)
+    private func change(_ mutate: (inout DisplaySettings) -> Void) {
+        var copy = settings
+        mutate(&copy)
+        guard copy != settings else { return }
+        settings = copy
+        settings.save()
+        apply(settings)
     }
 
     private func apply(_ new: DisplaySettings) {
-        guard !isApplying else { return }
         isApplying = true
         rebuildMenu()
-
         backend.apply(new) { [weak self] result in
-            guard let self else { return }
+            guard let self = self else { return }
             self.isApplying = false
             switch result {
             case .success:
-                self.settings = new
                 new.save()
             case .failure(let error):
-                // Keep the previously saved settings; the backend reports its own state.
                 self.showError("Could not apply the change: \(error.localizedDescription)")
             }
-            self.refreshIcon()
+            self.rebuildMenu()
         }
     }
 
@@ -528,37 +491,5 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             NSApp.activate(ignoringOtherApps: true)
             alert.runModal()
         }
-    }
-
-    // MARK: - Helpers
-
-    static func activeIPAddresses() -> [(label: String, ip: String)] {
-        var results: [(String, String)] = []
-        var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return results }
-        defer { freeifaddrs(ifaddr) }
-
-        var ptr: UnsafeMutablePointer<ifaddrs>? = first
-        while let current = ptr {
-            let flags = Int32(current.pointee.ifa_flags)
-            let isUp = (flags & IFF_UP) != 0
-            let isLoopback = (flags & IFF_LOOPBACK) != 0
-            if isUp && !isLoopback, let addr = current.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) {
-                var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                if getnameinfo(addr, socklen_t(addr.pointee.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
-                    let name = String(cString: current.pointee.ifa_name)
-                    let ip = String(cString: hostname)
-                    let label: String
-                    if ip.hasPrefix("169.254.") {
-                        label = "USB Cable (\(name))"
-                    } else {
-                        label = "Wi-Fi (\(name))"
-                    }
-                    results.append((label, ip))
-                }
-            }
-            ptr = current.pointee.ifa_next
-        }
-        return results
     }
 }

@@ -3,10 +3,7 @@
 // Owns the virtual display(s). Create and destroy are blocking calls meant to run on the
 // backend's queue, never on the main thread.
 //
-// In Landscape: creates one virtual display matching the iPad's aspect ratio.
-// In Portrait: creates two virtual displays:
-//   1. A portrait display (desktop) for the macOS user to interact with.
-//   2. A landscape display (stream) that receives the hardware-rotated frames for Moonlight.
+// Creates one virtual display matching the iPad's aspect ratio (landscape or portrait).
 
 import CoreGraphics
 import Foundation
@@ -33,7 +30,6 @@ enum DisplayError: LocalizedError {
 
 final class VirtualDisplayManager {
     private var desktopDisplay: IPDVirtualDisplay?
-    private var relayDisplay: IPDVirtualDisplay?
 
     /// ID of the user-facing desktop display, or nil when none exists.
     private(set) var desktopDisplayID: CGDirectDisplayID?
@@ -87,54 +83,42 @@ final class VirtualDisplayManager {
         return id
     }
 
-    /// Creates a portrait desktop display (for macOS) and a landscape stream display (for Moonlight).
+    /// Creates a single portrait display matching the iPad's aspect ratio. Returns the display ID.
     func createPortrait(
-        landscapeWidth: Int,
-        landscapeHeight: Int,
+        width: Int,
+        height: Int,
         refreshRate: Int,
         hiDPI: Bool
-    ) async throws -> (desktopID: CGDirectDisplayID, streamID: CGDirectDisplayID) {
+    ) async throws -> CGDirectDisplayID {
         guard IPDVirtualDisplay.isAvailable() else { throw DisplayError.unavailable }
         try await destroy()
         try? await Task.sleep(nanoseconds: 100_000_000)
 
-        // 1. User's portrait desktop (e.g. 1536 x 2048)
-        let desktopSerial = Self.serial(width: landscapeHeight, height: landscapeWidth, refreshRate: refreshRate, hiDPI: hiDPI)
-        let desktop = try IPDVirtualDisplay.make(
-            name: "iPad Desktop",
-            pixelWidth: UInt(landscapeHeight),
-            pixelHeight: UInt(landscapeWidth),
+        let serial = Self.serial(width: width, height: height, refreshRate: refreshRate, hiDPI: hiDPI)
+        let created = try IPDVirtualDisplay.make(
+            name: "iPad Display",
+            pixelWidth: UInt(width),
+            pixelHeight: UInt(height),
             refreshRate: Double(refreshRate),
             hiDPI: hiDPI,
-            serial: desktopSerial
+            serial: serial
         )
-        let dID = desktop.displayID
-        desktopDisplay = desktop
-        desktopDisplayID = dID
 
-        // 2. Stream display for Moonlight (e.g. 2048 x 1536, 1x)
-        let streamSerial = Self.serial(width: landscapeWidth, height: landscapeHeight, refreshRate: refreshRate, hiDPI: false) ^ 0x00F00000
-        let relay = try IPDVirtualDisplay.make(
-            name: "iPad Stream",
-            pixelWidth: UInt(landscapeWidth),
-            pixelHeight: UInt(landscapeHeight),
-            refreshRate: Double(refreshRate),
-            hiDPI: false,
-            serial: streamSerial
-        )
-        let sID = relay.displayID
-        relayDisplay = relay
-        streamDisplayID = sID
+        let id = created.displayID
+        NSLog("[VirtualDisplayManager] Created portrait display object, displayID = %u", id)
+        desktopDisplay = created
+        desktopDisplayID = id
+        streamDisplayID = id
 
-        guard await Self.waitAsync(timeout: 15, until: { Self.isDisplayActive(dID) && Self.isDisplayActive(sID) }) else {
+        guard await Self.waitAsync(timeout: 15, until: { Self.isDisplayActive(id) }) else {
+            NSLog("[VirtualDisplayManager] Timed out waiting for display ID: %u to appear", id)
             try? await destroy()
             throw DisplayError.didNotAppear
         }
 
-        Self.configureDisplayMode(displayID: dID, pixelWidth: landscapeHeight, pixelHeight: landscapeWidth, hiDPI: hiDPI)
-        Self.configureDisplayMode(displayID: sID, pixelWidth: landscapeWidth, pixelHeight: landscapeHeight, hiDPI: false)
-
-        return (desktopID: dID, streamID: sID)
+        Self.configureDisplayMode(displayID: id, pixelWidth: width, pixelHeight: height, hiDPI: hiDPI)
+        NSLog("[VirtualDisplayManager] Portrait display ID %u is online and active", id)
+        return id
     }
 
     /// Removes all virtual displays (if any) and waits until macOS no longer lists them. Safe to call twice.
@@ -145,11 +129,6 @@ final class VirtualDisplayManager {
         NSLog("[VirtualDisplayManager] destroy() called for IDs: %@", oldIDs.map(String.init).joined(separator: ", "))
         desktopDisplay?.destroy()
         desktopDisplay = nil
-        if let relay = relayDisplay {
-            relay.destroy()
-            try? await Task.sleep(nanoseconds: 50_000_000)
-            relayDisplay = nil
-        }
         desktopDisplayID = nil
         streamDisplayID = nil
 
@@ -170,11 +149,6 @@ final class VirtualDisplayManager {
         NSLog("[VirtualDisplayManager] destroySync() called for IDs: %@", oldIDs.map(String.init).joined(separator: ", "))
         desktopDisplay?.destroy()
         desktopDisplay = nil
-        if let relay = relayDisplay {
-            relay.destroy()
-            Thread.sleep(forTimeInterval: 0.05)
-            relayDisplay = nil
-        }
         desktopDisplayID = nil
         streamDisplayID = nil
 

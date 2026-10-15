@@ -2,8 +2,8 @@
 //
 // The StreamBackend the menu talks to. It owns the order of operations:
 //
-//   change requested -> stop Sunshine -> stop relay -> destroy old display(s) -> create new display(s)
-//                    -> start relay (if portrait) -> point Sunshine at capture display ID -> start Sunshine
+//   change requested -> stop Sunshine -> destroy old display -> create new display
+//                    -> point Sunshine at capture display ID -> start Sunshine
 //
 // All work runs in a managed task sequence on a private serial queue / task context.
 
@@ -57,7 +57,6 @@ final class DisplayStreamBackend: StreamBackend {
                 }
                 guard isCurrentStateActive else { return false }
                 return prev.orientation == settings.orientation &&
-                       prev.portraitRotation == settings.portraitRotation &&
                        prev.sizeIndex == settings.sizeIndex &&
                        prev.refreshRate == settings.refreshRate &&
                        prev.hiDPI == settings.hiDPI &&
@@ -106,35 +105,15 @@ final class DisplayStreamBackend: StreamBackend {
                     NSLog("[Backend] Created landscape display ID: %u", id)
 
                 case .portrait:
-
-                    NSLog("[Backend] Creating portrait displays (%dx%d)", p.landscapeWidth, p.landscapeHeight)
-                    let pair = try await displays.createPortrait(
-                        landscapeWidth: p.landscapeWidth,
-                        landscapeHeight: p.landscapeHeight,
+                    NSLog("[Backend] Creating portrait display (%dx%d)", p.landscapeHeight, p.landscapeWidth)
+                    let id = try await displays.createPortrait(
+                        width: p.landscapeHeight,
+                        height: p.landscapeWidth,
                         refreshRate: settings.refreshRate,
                         hiDPI: settings.hiDPI
                     )
-                    NSLog("[Backend] Created portrait pair: desktop=%u, stream=%u", pair.desktopID, pair.streamID)
-
-                    guard !Task.isCancelled else {
-                        try? await displays.destroy()
-                        return
-                    }
-
-                    // Start hardware-accelerated ScreenRelay
-                    NSLog("[Backend] Starting ScreenRelay...")
-                    let newRelay = try ScreenRelay.create()
-                    self.relay = newRelay
-                    try await newRelay.start(
-                        sourceDisplayID: pair.desktopID,
-                        targetDisplayID: pair.streamID,
-                        width: p.landscapeWidth,
-                        height: p.landscapeHeight,
-                        refreshRate: settings.refreshRate,
-                        orientation: settings.portraitRotation.exifOrientation
-                    )
-                    NSLog("[Backend] ScreenRelay started successfully")
-                    captureDisplayID = pair.streamID
+                    captureDisplayID = id
+                    NSLog("[Backend] Created portrait display ID: %u", id)
                 }
 
                 guard !Task.isCancelled else {
