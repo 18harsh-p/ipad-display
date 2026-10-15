@@ -1,13 +1,9 @@
 // VirtualDisplayManager.swift
 //
-// Owns the virtual display(s). Create and destroy are blocking calls meant to run on the
-// backend's queue, never on the main thread.
-//
-// In Landscape: creates one virtual display matching the iPad's aspect ratio.
-// In Portrait: creates two virtual displays:
-//   1. A portrait display (iPad Desktop) for the macOS user to interact with.
-//   2. A landscape display (iPad Stream) that receives the hardware-rotated frames for Moonlight.
+// Manages creation, configuration, and destruction of the private-API virtual display.
+// Only ONE virtual display is created at any time, named "iPad Display".
 
+import AppKit
 import CoreGraphics
 import Foundation
 
@@ -20,26 +16,27 @@ enum DisplayError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .unavailable:
-            return "This version of macOS no longer provides virtual displays to apps."
+            return "Virtual display support is not available on this Mac."
         case .didNotAppear:
             return "The virtual display was created but macOS did not bring it online."
         case .didNotDisappear:
-            return "The old virtual display did not go away. Quit and reopen the app."
+            return "macOS did not release the previous virtual display in time."
         case .screenRecordingPermissionRequired:
-            return "Screen Recording permission is required so ipad-display and Sunshine can capture the display for Moonlight. Please enable it in System Settings > Privacy & Security > Screen Recording for both ipad-display and Sunshine."
+            return "Screen Recording permission is required. Please enable it in System Settings > Privacy & Security > Screen Recording, then restart ipad-display."
         }
     }
 }
 
 final class VirtualDisplayManager {
     private var desktopDisplay: IPDVirtualDisplay?
-    private var relayDisplay: IPDVirtualDisplay?
 
-    /// ID of the user-facing desktop display, or nil when none exists.
+    /// ID of the single user-facing virtual display, or nil when none exists.
     private(set) var desktopDisplayID: CGDirectDisplayID?
 
-    /// ID of the stream display captured by Sunshine, or nil when none exists.
-    private(set) var streamDisplayID: CGDirectDisplayID?
+    /// ID of the display captured by Sunshine (same as desktopDisplayID in single-display mode).
+    var streamDisplayID: CGDirectDisplayID? {
+        return desktopDisplayID
+    }
 
     private static var generation: UInt32 = 0x1000
 
@@ -70,7 +67,6 @@ final class VirtualDisplayManager {
         NSLog("[VirtualDisplayManager] Created landscape display object, displayID = %u", id)
         desktopDisplay = created
         desktopDisplayID = id
-        streamDisplayID = id
 
         guard await Self.waitAsync(timeout: 15, until: { Self.isDisplayActive(id) }) else {
             NSLog("[VirtualDisplayManager] Timed out waiting for display ID: %u to appear", id)
@@ -82,71 +78,50 @@ final class VirtualDisplayManager {
         return id
     }
 
-    /// Creates a portrait desktop display (for macOS) and a landscape stream display (for Moonlight).
+    /// Creates a single portrait display (e.g. 1536 x 2048). Returns the display ID.
     func createPortrait(
         landscapeWidth: Int,
         landscapeHeight: Int,
         refreshRate: Int,
         hiDPI: Bool
-    ) async throws -> (desktopID: CGDirectDisplayID, streamID: CGDirectDisplayID) {
+    ) async throws -> CGDirectDisplayID {
         guard IPDVirtualDisplay.isAvailable() else { throw DisplayError.unavailable }
         try await destroy()
         try? await Task.sleep(nanoseconds: 100_000_000)
 
-        // 1. User's portrait desktop (e.g. 1536 x 2048)
-        let desktopSerial = Self.nextSerial()
-        let desktop = try IPDVirtualDisplay.make(
-            name: "iPad Desktop",
+        let serial = Self.nextSerial()
+        let created = try IPDVirtualDisplay.make(
+            name: "iPad Display",
             pixelWidth: UInt(landscapeHeight),
             pixelHeight: UInt(landscapeWidth),
             refreshRate: Double(refreshRate),
             hiDPI: hiDPI,
-            serial: desktopSerial
+            serial: serial
         )
-        let dID = desktop.displayID
-        desktopDisplay = desktop
-        desktopDisplayID = dID
+        let id = created.displayID
+        NSLog("[VirtualDisplayManager] Created portrait display object, displayID = %u", id)
+        desktopDisplay = created
+        desktopDisplayID = id
 
-        // 2. Stream display for Moonlight (e.g. 2048 x 1536, 1x)
-        let streamSerial = Self.nextSerial()
-        let relay = try IPDVirtualDisplay.make(
-            name: "iPad Stream",
-            pixelWidth: UInt(landscapeWidth),
-            pixelHeight: UInt(landscapeHeight),
-            refreshRate: Double(refreshRate),
-            hiDPI: false,
-            serial: streamSerial
-        )
-        let sID = relay.displayID
-        relayDisplay = relay
-        streamDisplayID = sID
-
-        guard await Self.waitAsync(timeout: 15, until: { Self.isDisplayActive(dID) && Self.isDisplayActive(sID) }) else {
-            NSLog("[VirtualDisplayManager] Timed out waiting for display IDs (%u, %u) to appear", dID, sID)
+        guard await Self.waitAsync(timeout: 15, until: { Self.isDisplayActive(id) }) else {
+            NSLog("[VirtualDisplayManager] Timed out waiting for portrait display ID: %u to appear", id)
             try? await destroy()
             throw DisplayError.didNotAppear
         }
 
-        Self.configureDisplayMode(displayID: dID, pixelWidth: landscapeHeight, pixelHeight: landscapeWidth, hiDPI: hiDPI)
-        Self.configureDisplayMode(displayID: sID, pixelWidth: landscapeWidth, pixelHeight: landscapeHeight, hiDPI: false)
-
-        return (desktopID: dID, streamID: sID)
+        Self.configureDisplayMode(displayID: id, pixelWidth: landscapeHeight, pixelHeight: landscapeWidth, hiDPI: hiDPI)
+        NSLog("[VirtualDisplayManager] Portrait display ID %u is online and active", id)
+        return id
     }
 
-    /// Removes all virtual displays (if any) and waits until macOS no longer lists them. Safe to call twice.
+    /// Removes the virtual display (if any) and waits briefly. Safe to call repeatedly.
     func destroy() async throws {
-        let oldIDs = Set([desktopDisplayID, streamDisplayID].compactMap { $0 }.filter { $0 != 0 })
-        guard !oldIDs.isEmpty else { return }
+        guard let id = desktopDisplayID, id != 0 else { return }
 
-        NSLog("[VirtualDisplayManager] destroy() called for IDs: %@", oldIDs.map(String.init).joined(separator: ", "))
+        NSLog("[VirtualDisplayManager] destroy() called for ID: %u", id)
         desktopDisplay?.destroy()
         desktopDisplay = nil
-        if let relay = relayDisplay {
-            relay.destroy()
-            relayDisplay = nil
-        }
         desktopDisplayID = nil
-        streamDisplayID = nil
 
         // Brief yield to let WindowServer unregister the display
         try? await Task.sleep(nanoseconds: 250_000_000)
@@ -155,109 +130,75 @@ final class VirtualDisplayManager {
 
     /// Synchronous version for app termination.
     func destroySync() {
-        let oldIDs = Set([desktopDisplayID, streamDisplayID].compactMap { $0 }.filter { $0 != 0 })
-        guard !oldIDs.isEmpty else { return }
-
-        NSLog("[VirtualDisplayManager] destroySync() called for IDs: %@", oldIDs.map(String.init).joined(separator: ", "))
+        guard let id = desktopDisplayID, id != 0 else { return }
+        NSLog("[VirtualDisplayManager] destroySync() called for ID: %u", id)
         desktopDisplay?.destroy()
         desktopDisplay = nil
-        if let relay = relayDisplay {
-            relay.destroy()
-            Thread.sleep(forTimeInterval: 0.05)
-            relayDisplay = nil
-        }
         desktopDisplayID = nil
-        streamDisplayID = nil
-
-        _ = Self.waitSync(timeout: 3, until: { oldIDs.allSatisfy { !Self.isDisplayPresent($0) } })
     }
 
-    // MARK: - Helpers
-
-    /// Configures the display mode to ensure the requested resolution and HiDPI scaling are active.
-    static func configureDisplayMode(displayID: CGDirectDisplayID, pixelWidth: Int, pixelHeight: Int, hiDPI: Bool) {
-        let targetPointWidth = hiDPI ? pixelWidth / 2 : pixelWidth
-        let targetPointHeight = hiDPI ? pixelHeight / 2 : pixelHeight
-
+    /// Sets the desktop resolution and HiDPI scaling mode via CoreGraphics.
+    private static func configureDisplayMode(displayID: CGDirectDisplayID, pixelWidth: Int, pixelHeight: Int, hiDPI: Bool) {
         let options = [kCGDisplayShowDuplicateLowResolutionModes: true] as CFDictionary
         guard let modes = CGDisplayCopyAllDisplayModes(displayID, options) as? [CGDisplayMode] else {
             NSLog("[VirtualDisplayManager] Could not get modes for display %u", displayID)
             return
         }
 
-        var matchedMode: CGDisplayMode?
-        // 1. Look for the exact mode matching pixel dimensions and target point dimensions
-        for mode in modes {
-            if mode.pixelWidth == pixelWidth && mode.pixelHeight == pixelHeight &&
-               mode.width == targetPointWidth && mode.height == targetPointHeight {
-                matchedMode = mode
-                break
-            }
-        }
+        let targetPointsW = hiDPI ? pixelWidth / 2 : pixelWidth
+        let targetPointsH = hiDPI ? pixelHeight / 2 : pixelHeight
 
-        // 2. Fallback: match pixel dimensions
-        if matchedMode == nil {
-            for mode in modes {
-                if mode.pixelWidth == pixelWidth && mode.pixelHeight == pixelHeight {
-                    matchedMode = mode
+        var bestMode: CGDisplayMode?
+        for mode in modes {
+            let pw = mode.pixelWidth
+            let ph = mode.pixelHeight
+            let w = mode.width
+            let h = mode.height
+
+            if pw == pixelWidth && ph == pixelHeight {
+                if hiDPI && (w == targetPointsW && h == targetPointsH) {
+                    bestMode = mode
                     break
+                } else if !hiDPI && (w == pixelWidth && h == pixelHeight) {
+                    bestMode = mode
+                    break
+                } else if bestMode == nil {
+                    bestMode = mode
                 }
             }
         }
 
-        guard let targetMode = matchedMode else {
-            NSLog("[VirtualDisplayManager] Could not find suitable mode for display %u (%dx%d)", displayID, pixelWidth, pixelHeight)
+        guard let chosen = bestMode else {
+            NSLog("[VirtualDisplayManager] No matching mode for display %u (target %dx%d, hiDPI: %d)",
+                  displayID, pixelWidth, pixelHeight, hiDPI ? 1 : 0)
             return
         }
 
         var config: CGDisplayConfigRef?
-        guard CGBeginDisplayConfiguration(&config) == .success, let config = config else {
+        guard CGBeginDisplayConfiguration(&config) == .success, let cfg = config else {
             NSLog("[VirtualDisplayManager] CGBeginDisplayConfiguration failed for display %u", displayID)
             return
         }
 
-        let configErr = CGConfigureDisplayWithDisplayMode(config, displayID, targetMode, nil)
-        if configErr != .success {
-            NSLog("[VirtualDisplayManager] CGConfigureDisplayWithDisplayMode failed: %d", configErr.rawValue)
-            CGCancelDisplayConfiguration(config)
+        let setErr = CGConfigureDisplayWithDisplayMode(cfg, displayID, chosen, nil)
+        if setErr != .success {
+            NSLog("[VirtualDisplayManager] CGConfigureDisplayWithDisplayMode failed: %d", setErr.rawValue)
+            CGCancelDisplayConfiguration(cfg)
             return
         }
 
-        let completeErr = CGCompleteDisplayConfiguration(config, .forSession)
+        let completeErr = CGCompleteDisplayConfiguration(cfg, .forSession)
         if completeErr != .success {
             NSLog("[VirtualDisplayManager] CGCompleteDisplayConfiguration failed: %d", completeErr.rawValue)
         } else {
             NSLog("[VirtualDisplayManager] Successfully committed mode for display %u: %dx%d (pt: %dx%d, flags: 0x%x)",
-                  displayID, targetMode.pixelWidth, targetMode.pixelHeight, targetMode.width, targetMode.height, targetMode.ioFlags)
+                  displayID, chosen.pixelWidth, chosen.pixelHeight, chosen.width, chosen.height, chosen.ioFlags)
         }
     }
 
-    /// Verifies that the display is not only online but actively published in macOS active displays list,
-    /// ensuring Sunshine/encoders can successfully open and stream it.
+    /// Checks whether the display is reported as active by macOS.
     private static func isDisplayActive(_ id: CGDirectDisplayID) -> Bool {
-        guard id != 0 else { return false }
-        guard CGDisplayIsActive(id) == 1 else { return false }
-        var activeCount: UInt32 = 0
-        guard CGGetActiveDisplayList(0, nil, &activeCount) == .success, activeCount > 0 else { return false }
-        var ids = [CGDirectDisplayID](repeating: 0, count: Int(activeCount))
-        guard CGGetActiveDisplayList(activeCount, &ids, &activeCount) == .success else { return false }
-        return ids.prefix(Int(activeCount)).contains(id)
-    }
-
-    /// Checks whether the display is still reported as online or active by macOS.
-    private static func isDisplayPresent(_ id: CGDirectDisplayID) -> Bool {
-        guard id != 0 else { return false }
-        if CGDisplayIsOnline(id) == 1 || CGDisplayIsActive(id) == 1 {
-            return true
-        }
-        var onlineCount: UInt32 = 0
-        if CGGetOnlineDisplayList(0, nil, &onlineCount) == .success, onlineCount > 0 {
-            var ids = [CGDirectDisplayID](repeating: 0, count: Int(onlineCount))
-            if CGGetOnlineDisplayList(onlineCount, &ids, &onlineCount) == .success {
-                return ids.prefix(Int(onlineCount)).contains(id)
-            }
-        }
-        return false
+        return CGDisplayIsActive(id) == 1
     }
 
     private static func waitAsync(timeout: TimeInterval, until condition: () -> Bool) async -> Bool {
@@ -265,15 +206,6 @@ final class VirtualDisplayManager {
         while Date() < deadline {
             if condition() { return true }
             try? await Task.sleep(nanoseconds: 50_000_000)
-        }
-        return condition()
-    }
-
-    private static func waitSync(timeout: TimeInterval, until condition: () -> Bool) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if condition() { return true }
-            Thread.sleep(forTimeInterval: 0.05)
         }
         return condition()
     }

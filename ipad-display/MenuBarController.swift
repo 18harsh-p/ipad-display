@@ -213,14 +213,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let orientationItem = NSMenuItem(title: "Orientation", action: nil, keyEquivalent: "")
         let orientationMenu = NSMenu()
 
-        for rot in PortraitRotation.allCases {
-            let item = NSMenuItem(title: rot.title, action: #selector(pickPortraitRotation(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = rot.rawValue
-            item.state = (settings.orientation == .portrait && settings.portraitRotation == rot) ? .on : .off
-            item.isEnabled = !isApplying
-            orientationMenu.addItem(item)
-        }
+        let portraitItem = NSMenuItem(title: "Portrait", action: #selector(pickOrientationPortrait), keyEquivalent: "")
+        portraitItem.target = self
+        portraitItem.state = settings.orientation == .portrait ? .on : .off
+        portraitItem.isEnabled = !isApplying
+        orientationMenu.addItem(portraitItem)
 
         let landscapeItem = NSMenuItem(title: "Landscape", action: #selector(pickOrientationLandscape), keyEquivalent: "")
         landscapeItem.target = self
