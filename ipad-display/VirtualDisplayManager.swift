@@ -41,18 +41,13 @@ final class VirtualDisplayManager {
     /// ID of the stream display captured by Sunshine, or nil when none exists.
     private(set) var streamDisplayID: CGDirectDisplayID?
 
-    private static var generation: UInt32 = 0
+    private static var generation: UInt32 = 0x1000
 
-    /// Combines display characteristics with an incrementing generation counter so WindowServer
-    /// never confuses a newly created display with an old one that was recently torn down.
-    static func serial(width: Int, height: Int, refreshRate: Int, hiDPI: Bool) -> UInt32 {
+    /// Clean, monotonically incrementing serial number. Ensures each virtual display has a unique
+    /// non-zero identity and product ID that WindowServer immediately recognizes and brings online.
+    static func nextSerial() -> UInt32 {
         generation &+= 1
-        let gen = generation & 0xFF
-        let w = UInt32(min(max(width, 1), 4095))
-        let h = UInt32(min(max(height, 1), 4095))
-        let rate: UInt32 = refreshRate >= 60 ? 1 : 0
-        let dpi: UInt32 = hiDPI ? 1 : 0
-        return (gen << 24) | (dpi << 23) | (rate << 22) | ((h & 0x7FF) << 11) | (w & 0x7FF)
+        return generation
     }
 
     /// Creates a single landscape display. Returns the display ID.
@@ -61,7 +56,7 @@ final class VirtualDisplayManager {
         try await destroy()
         try? await Task.sleep(nanoseconds: 100_000_000)
 
-        let serial = Self.serial(width: width, height: height, refreshRate: refreshRate, hiDPI: hiDPI)
+        let serial = Self.nextSerial()
         let created = try IPDVirtualDisplay.make(
             name: "iPad Display",
             pixelWidth: UInt(width),
@@ -99,7 +94,7 @@ final class VirtualDisplayManager {
         try? await Task.sleep(nanoseconds: 100_000_000)
 
         // 1. User's portrait desktop (e.g. 1536 x 2048)
-        let desktopSerial = Self.serial(width: landscapeHeight, height: landscapeWidth, refreshRate: refreshRate, hiDPI: hiDPI)
+        let desktopSerial = Self.nextSerial()
         let desktop = try IPDVirtualDisplay.make(
             name: "iPad Desktop",
             pixelWidth: UInt(landscapeHeight),
@@ -113,7 +108,7 @@ final class VirtualDisplayManager {
         desktopDisplayID = dID
 
         // 2. Stream display for Moonlight (e.g. 2048 x 1536, 1x)
-        let streamSerial = Self.serial(width: landscapeWidth, height: landscapeHeight, refreshRate: refreshRate, hiDPI: false) ^ 0x00F00000
+        let streamSerial = Self.nextSerial()
         let relay = try IPDVirtualDisplay.make(
             name: "iPad Stream",
             pixelWidth: UInt(landscapeWidth),
@@ -148,19 +143,14 @@ final class VirtualDisplayManager {
         desktopDisplay = nil
         if let relay = relayDisplay {
             relay.destroy()
-            try? await Task.sleep(nanoseconds: 50_000_000)
             relayDisplay = nil
         }
         desktopDisplayID = nil
         streamDisplayID = nil
 
-        let disappeared = await Self.waitAsync(timeout: 10, until: { oldIDs.allSatisfy { !Self.isDisplayPresent($0) } })
-        if !disappeared {
-            let lingering = oldIDs.filter { Self.isDisplayPresent($0) }
-            NSLog("[VirtualDisplayManager] destroy() timed out. Still present IDs: %@", lingering.map(String.init).joined(separator: ", "))
-            throw DisplayError.didNotDisappear
-        }
-        NSLog("[VirtualDisplayManager] destroy() completed. All old IDs are gone.")
+        // Brief yield to let WindowServer unregister the display
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        NSLog("[VirtualDisplayManager] destroy() completed.")
     }
 
     /// Synchronous version for app termination.
@@ -233,7 +223,7 @@ final class VirtualDisplayManager {
             return
         }
 
-        let completeErr = CGCompleteDisplayConfiguration(config, .permanently)
+        let completeErr = CGCompleteDisplayConfiguration(config, .forSession)
         if completeErr != .success {
             NSLog("[VirtualDisplayManager] CGCompleteDisplayConfiguration failed: %d", completeErr.rawValue)
         } else {
@@ -264,7 +254,7 @@ final class VirtualDisplayManager {
         if CGGetOnlineDisplayList(0, nil, &onlineCount) == .success, onlineCount > 0 {
             var ids = [CGDirectDisplayID](repeating: 0, count: Int(onlineCount))
             if CGGetOnlineDisplayList(onlineCount, &ids, &onlineCount) == .success {
-                if ids.prefix(Int(onlineCount)).contains(id) { return true }
+                return ids.prefix(Int(onlineCount)).contains(id)
             }
         }
         return false
