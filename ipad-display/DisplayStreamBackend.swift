@@ -41,8 +41,8 @@ final class DisplayStreamBackend: StreamBackend {
     func apply(_ settings: DisplaySettings, completion: @escaping (Result<Void, Error>) -> Void) {
         currentTask?.cancel()
         currentTask = Task {
-            NSLog("[Backend] apply called: orientation=%@, preset=%@, refreshRate=%d, hiDPI=%d, streamAudio=%d",
-                  settings.orientation.rawValue, settings.preset.name, settings.refreshRate, settings.hiDPI ? 1 : 0, settings.streamAudio ? 1 : 0)
+            NSLog("[Backend] apply called: orientation=%@, rotation=%@, preset=%@, refreshRate=%d, hiDPI=%d, streamAudio=%d",
+                  settings.orientation.rawValue, settings.portraitRotation.rawValue, settings.preset.name, settings.refreshRate, settings.hiDPI ? 1 : 0, settings.streamAudio ? 1 : 0)
 
             // Fast path: if only streamAudio changed and displays are already up, simply restart Sunshine
             let canFastRestartSunshine: Bool = {
@@ -57,6 +57,7 @@ final class DisplayStreamBackend: StreamBackend {
                 }
                 guard isCurrentStateActive else { return false }
                 return prev.orientation == settings.orientation &&
+                       prev.portraitRotation == settings.portraitRotation &&
                        prev.sizeIndex == settings.sizeIndex &&
                        prev.refreshRate == settings.refreshRate &&
                        prev.hiDPI == settings.hiDPI &&
@@ -83,8 +84,17 @@ final class DisplayStreamBackend: StreamBackend {
             do {
                 // Stop Sunshine and previous relay
                 sunshine.stop()
-                self.relay?.stop()
-                self.relay = nil
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated {
+                        self.relay?.stop()
+                        self.relay = nil
+                    }
+                } else {
+                    await MainActor.run {
+                        self.relay?.stop()
+                        self.relay = nil
+                    }
+                }
                 try await displays.destroy()
 
                 guard !Task.isCancelled else { return }
@@ -105,20 +115,43 @@ final class DisplayStreamBackend: StreamBackend {
                     NSLog("[Backend] Created landscape display ID: %u", id)
 
                 case .portrait:
-                    NSLog("[Backend] Creating portrait display (%dx%d)", p.landscapeHeight, p.landscapeWidth)
-                    let id = try await displays.createPortrait(
-                        width: p.landscapeHeight,
-                        height: p.landscapeWidth,
+                    NSLog("[Backend] Creating portrait displays (%dx%d)", p.landscapeWidth, p.landscapeHeight)
+                    let pair = try await displays.createPortrait(
+                        landscapeWidth: p.landscapeWidth,
+                        landscapeHeight: p.landscapeHeight,
                         refreshRate: settings.refreshRate,
                         hiDPI: settings.hiDPI
                     )
-                    captureDisplayID = id
-                    NSLog("[Backend] Created portrait display ID: %u", id)
+                    NSLog("[Backend] Created portrait pair: desktop=%u, stream=%u", pair.desktopID, pair.streamID)
+
+                    guard !Task.isCancelled else {
+                        try? await displays.destroy()
+                        return
+                    }
+
+                    // Start hardware-accelerated ScreenRelay with cursor guard
+                    NSLog("[Backend] Starting ScreenRelay with rotation: %@", settings.portraitRotation.title)
+                    let newRelay = try await MainActor.run { () throws -> ScreenRelay in
+                        return try ScreenRelay.create()
+                    }
+                    self.relay = newRelay
+                    try await newRelay.start(
+                        sourceDisplayID: pair.desktopID,
+                        targetDisplayID: pair.streamID,
+                        width: p.landscapeWidth,
+                        height: p.landscapeHeight,
+                        refreshRate: settings.refreshRate,
+                        orientation: settings.portraitRotation.exifOrientation
+                    )
+                    NSLog("[Backend] ScreenRelay started successfully")
+                    captureDisplayID = pair.streamID
                 }
 
                 guard !Task.isCancelled else {
-                    self.relay?.stop()
-                    self.relay = nil
+                    await MainActor.run {
+                        self.relay?.stop()
+                        self.relay = nil
+                    }
                     try? await displays.destroy()
                     return
                 }
@@ -133,8 +166,10 @@ final class DisplayStreamBackend: StreamBackend {
                 result = .success(())
             } catch {
                 NSLog("[Backend] apply failed with error: %@", error.localizedDescription)
-                self.relay?.stop()
-                self.relay = nil
+                await MainActor.run {
+                    self.relay?.stop()
+                    self.relay = nil
+                }
                 try? await displays.destroy()
                 activeCaptureDisplayID = nil
                 appliedSettings = nil
@@ -198,29 +233,34 @@ final class DisplayStreamBackend: StreamBackend {
         }
     }
 
-    // MARK: - Events and state
+    // MARK: - Internals
+
+    private func setState(_ next: StreamState) {
+        stateLock.lock()
+        let changed = currentState != next
+        currentState = next
+        stateLock.unlock()
+
+        if changed {
+            NSLog("[Backend] State -> %@", next.menuText)
+            DispatchQueue.main.async { [weak self] in
+                self?.onStateChange?()
+            }
+        }
+    }
 
     private func handle(_ event: SunshineEvent) {
         switch event {
         case .ready:
-            break  // apply() moves to .waitingForClient once start() returns
+            break
         case .clientConnected:
             setState(.streaming(clientName: "iPad"))
         case .clientDisconnected:
             setState(.waitingForClient)
         case .exited(let status):
             if state != .stopped {
-                setState(.failed("The streaming engine stopped (code \(status)). Choose Restart display."))
+                setState(.failed("Sunshine process exited unexpectedly (code \(status))"))
             }
         }
-    }
-
-    private func setState(_ new: StreamState) {
-        stateLock.lock()
-        let changed = (currentState != new)
-        currentState = new
-        stateLock.unlock()
-        guard changed else { return }
-        DispatchQueue.main.async { [weak self] in self?.onStateChange?() }
     }
 }

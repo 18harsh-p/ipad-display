@@ -31,20 +31,20 @@ enum Orientation: String, Codable, CaseIterable {
 }
 
 enum PortraitRotation: String, Codable, CaseIterable {
-    case portUp
     case portDown
+    case portUp
 
     var title: String {
         switch self {
-        case .portUp: return "Portrait (Port Up)"
-        case .portDown: return "Portrait (Port Down)"
+        case .portDown: return "Portrait (Cable at Bottom)"
+        case .portUp: return "Portrait (Cable at Top)"
         }
     }
 
     var exifOrientation: CGImagePropertyOrientation {
         switch self {
-        case .portUp: return .left     // 270° CCW: holding iPad upright with port at top presents upright screen
-        case .portDown: return .right  // 90° CW: holding iPad upright with port at bottom presents upright screen
+        case .portDown: return .left  // 270° CW / 90° CCW: top of screen at top of iPad when cable is at bottom
+        case .portUp: return .right   // 90° CW: top of screen at top of iPad when cable is at top
         }
     }
 }
@@ -64,7 +64,7 @@ struct SizePreset: Codable, Equatable {
 
 struct DisplaySettings: Codable, Equatable, Sendable {
     var orientation: Orientation = .portrait
-    var portraitRotation: PortraitRotation = .portUp
+    var portraitRotation: PortraitRotation = .portDown
     var sizeIndex: Int = 0
     var refreshRate: Int = 60
     var hiDPI: Bool = true   // "Retina": text is drawn at double density, so a 2048x1536 iPad looks like 1024x768
@@ -76,7 +76,7 @@ struct DisplaySettings: Codable, Equatable, Sendable {
 
     init(
         orientation: Orientation = .portrait,
-        portraitRotation: PortraitRotation = .portUp,
+        portraitRotation: PortraitRotation = .portDown,
         sizeIndex: Int = 0,
         refreshRate: Int = 60,
         hiDPI: Bool = true,
@@ -93,7 +93,7 @@ struct DisplaySettings: Codable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.orientation = try container.decodeIfPresent(Orientation.self, forKey: .orientation) ?? .portrait
-        self.portraitRotation = try container.decodeIfPresent(PortraitRotation.self, forKey: .portraitRotation) ?? .portUp
+        self.portraitRotation = try container.decodeIfPresent(PortraitRotation.self, forKey: .portraitRotation) ?? .portDown
         self.sizeIndex = try container.decodeIfPresent(Int.self, forKey: .sizeIndex) ?? 0
         self.refreshRate = try container.decodeIfPresent(Int.self, forKey: .refreshRate) ?? 60
         self.hiDPI = try container.decodeIfPresent(Bool.self, forKey: .hiDPI) ?? true
@@ -111,7 +111,7 @@ struct DisplaySettings: Codable, Equatable, Sendable {
         }
     }
 
-    private static let key = "displaySettings.v4"
+    private static let key = "displaySettings.v5"
 
     static func load() -> DisplaySettings {
         guard let data = UserDefaults.standard.data(forKey: key),
@@ -213,11 +213,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let orientationItem = NSMenuItem(title: "Orientation", action: nil, keyEquivalent: "")
         let orientationMenu = NSMenu()
 
-        let portraitItem = NSMenuItem(title: "Portrait", action: #selector(pickOrientationPortrait), keyEquivalent: "")
-        portraitItem.target = self
-        portraitItem.state = settings.orientation == .portrait ? .on : .off
-        portraitItem.isEnabled = !isApplying
-        orientationMenu.addItem(portraitItem)
+        for rot in PortraitRotation.allCases {
+            let item = NSMenuItem(title: rot.title, action: #selector(pickPortraitRotation(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = rot.rawValue
+            item.state = (settings.orientation == .portrait && settings.portraitRotation == rot) ? .on : .off
+            item.isEnabled = !isApplying
+            orientationMenu.addItem(item)
+        }
 
         let landscapeItem = NSMenuItem(title: "Landscape", action: #selector(pickOrientationLandscape), keyEquivalent: "")
         landscapeItem.target = self

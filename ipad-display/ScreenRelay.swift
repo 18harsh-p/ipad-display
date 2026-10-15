@@ -88,12 +88,56 @@ final class RelayRenderer: NSObject, SCStreamOutput, @unchecked Sendable {
     }
 }
 
+final class CursorGuard {
+    private var monitor: Any?
+    private let streamDisplayID: CGDirectDisplayID
+    private let desktopDisplayID: CGDirectDisplayID
+
+    init(streamDisplayID: CGDirectDisplayID, desktopDisplayID: CGDirectDisplayID) {
+        self.streamDisplayID = streamDisplayID
+        self.desktopDisplayID = desktopDisplayID
+
+        self.monitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
+        ) { [weak self] _ in
+            self?.checkAndDeflect()
+        }
+    }
+
+    private func checkAndDeflect() {
+        let mouseLoc = NSEvent.mouseLocation
+        guard let streamScreen = NSScreen.screens.first(where: {
+            (($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0) == streamDisplayID
+        }) else { return }
+
+        if streamScreen.frame.contains(mouseLoc) {
+            if let desktopScreen = NSScreen.screens.first(where: {
+                (($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0) == desktopDisplayID
+            }) {
+                let targetX = min(max(mouseLoc.x, desktopScreen.frame.minX + 20), desktopScreen.frame.maxX - 20)
+                let targetY = min(max(mouseLoc.y, desktopScreen.frame.minY + 20), desktopScreen.frame.maxY - 20)
+                let primaryHeight = NSScreen.screens.first?.frame.height ?? 1000
+                let cgPoint = CGPoint(x: targetX, y: primaryHeight - targetY)
+                CGWarpMouseCursorPosition(cgPoint)
+            }
+        }
+    }
+
+    func stop() {
+        if let m = monitor {
+            NSEvent.removeMonitor(m)
+            monitor = nil
+        }
+    }
+}
+
 @MainActor
 final class ScreenRelay: NSObject, SCStreamDelegate {
     private var window: NSWindow?
     private var stream: SCStream?
     private var renderer: RelayRenderer?
     private var targetDisplayID: CGDirectDisplayID?
+    private var cursorGuard: CursorGuard?
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let ciContext: CIContext
@@ -222,6 +266,9 @@ final class ScreenRelay: NSObject, SCStreamDelegate {
 
             // Reveal window only after capture has started
             window.orderFrontRegardless()
+
+            // Guard against cursor wandering into the relay display
+            cursorGuard = CursorGuard(streamDisplayID: targetDisplayID, desktopDisplayID: sourceDisplayID)
         } catch {
             stop()
             throw error
@@ -243,6 +290,8 @@ final class ScreenRelay: NSObject, SCStreamDelegate {
 
     func stop() {
         NotificationCenter.default.removeObserver(self, name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        cursorGuard?.stop()
+        cursorGuard = nil
         if let stream = self.stream {
             Task {
                 try? await stream.stopCapture()
