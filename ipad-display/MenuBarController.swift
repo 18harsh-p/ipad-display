@@ -87,10 +87,9 @@ struct DisplaySettings: Codable, Equatable, Sendable {
     var refreshRate: Int = 60
     var hiDPI: Bool = true   // "Retina": text is drawn at double density, so a 2048x1536 iPad looks like 1024x768
     var streamAudio: Bool = false // false = Mac only (blocked); true = Mac + iPad (dual audio)
-    var showIPInMenuBar: Bool = true
 
     enum CodingKeys: String, CodingKey {
-        case orientation, portraitRotation, sizeIndex, refreshRate, hiDPI, streamAudio, showIPInMenuBar
+        case orientation, portraitRotation, sizeIndex, refreshRate, hiDPI, streamAudio
     }
 
     init(
@@ -99,8 +98,7 @@ struct DisplaySettings: Codable, Equatable, Sendable {
         sizeIndex: Int = 0,
         refreshRate: Int = 60,
         hiDPI: Bool = true,
-        streamAudio: Bool = false,
-        showIPInMenuBar: Bool = true
+        streamAudio: Bool = false
     ) {
         self.orientation = orientation
         self.portraitRotation = portraitRotation
@@ -108,7 +106,6 @@ struct DisplaySettings: Codable, Equatable, Sendable {
         self.refreshRate = refreshRate
         self.hiDPI = hiDPI
         self.streamAudio = streamAudio
-        self.showIPInMenuBar = showIPInMenuBar
     }
 
     init(from decoder: Decoder) throws {
@@ -119,7 +116,6 @@ struct DisplaySettings: Codable, Equatable, Sendable {
         self.refreshRate = try container.decodeIfPresent(Int.self, forKey: .refreshRate) ?? 60
         self.hiDPI = try container.decodeIfPresent(Bool.self, forKey: .hiDPI) ?? true
         self.streamAudio = try container.decodeIfPresent(Bool.self, forKey: .streamAudio) ?? false
-        self.showIPInMenuBar = try container.decodeIfPresent(Bool.self, forKey: .showIPInMenuBar) ?? true
     }
 
     var preset: SizePreset { SizePreset.all[min(max(sizeIndex, 0), SizePreset.all.count - 1)] }
@@ -383,11 +379,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        let showIP = NSMenuItem(title: "Show IP in menu bar", action: #selector(toggleShowIP), keyEquivalent: "")
-        showIP.target = self
-        showIP.state = settings.showIPInMenuBar ? .on : .off
-        menu.addItem(showIP)
-
         let login = NSMenuItem(title: "Open at login", action: #selector(toggleLogin), keyEquivalent: "")
         login.target = self
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
@@ -406,12 +397,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
         statusItem.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "iPad display")
 
+        statusItem.button?.title = ""
         let primaryIP = Self.getIPv4Addresses().first?.ip
-        if settings.showIPInMenuBar, let primaryIP {
-            statusItem.button?.title = " \(primaryIP)"
-        } else {
-            statusItem.button?.title = ""
-        }
 
         let ipInfo = primaryIP.map { " • IP: \($0)" } ?? ""
         statusItem.button?.toolTip = "\(backend.state.menuText)\(ipInfo)"
@@ -555,10 +542,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         NSApp.terminate(nil)
     }
 
-    @objc private func toggleShowIP() {
-        change { $0.showIPInMenuBar.toggle() }
-    }
-
     @objc private func copyPrimaryIP() {
         if let ip = Self.getIPv4Addresses().first?.ip {
             copyToPasteboard(ip)
@@ -580,17 +563,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         var copy = settings
         mutate(&copy)
         guard copy != settings else { return }
-        let needsDisplayReapply = (copy.pixelSize != settings.pixelSize ||
-                                   copy.refreshRate != settings.refreshRate ||
-                                   copy.hiDPI != settings.hiDPI ||
-                                   copy.streamAudio != settings.streamAudio)
         settings = copy
         settings.save()
-        if needsDisplayReapply {
-            apply(settings)
-        } else {
-            refreshIcon()
-        }
+        apply(settings)
     }
 
     private func apply(_ new: DisplaySettings) {
