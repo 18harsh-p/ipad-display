@@ -14,9 +14,27 @@
 
 import AppKit
 import CoreGraphics
+import Darwin
 import ServiceManagement
 
 // MARK: - Model
+struct NetworkAddress: Sendable {
+    let interface: String
+    let ip: String
+
+    var displayName: String {
+        if interface == "en0" {
+            return "Wi-Fi (\(interface)): \(ip)"
+        } else if interface.hasPrefix("en") {
+            return "Ethernet/USB (\(interface)): \(ip)"
+        } else if interface.hasPrefix("utun") {
+            return "VPN (\(interface)): \(ip)"
+        } else {
+            return "\(interface): \(ip)"
+        }
+    }
+}
+
 
 enum Orientation: String, Codable, CaseIterable {
     case portrait
@@ -69,9 +87,10 @@ struct DisplaySettings: Codable, Equatable, Sendable {
     var refreshRate: Int = 60
     var hiDPI: Bool = true   // "Retina": text is drawn at double density, so a 2048x1536 iPad looks like 1024x768
     var streamAudio: Bool = false // false = Mac only (blocked); true = Mac + iPad (dual audio)
+    var showIPInMenuBar: Bool = true
 
     enum CodingKeys: String, CodingKey {
-        case orientation, portraitRotation, sizeIndex, refreshRate, hiDPI, streamAudio
+        case orientation, portraitRotation, sizeIndex, refreshRate, hiDPI, streamAudio, showIPInMenuBar
     }
 
     init(
@@ -80,7 +99,8 @@ struct DisplaySettings: Codable, Equatable, Sendable {
         sizeIndex: Int = 0,
         refreshRate: Int = 60,
         hiDPI: Bool = true,
-        streamAudio: Bool = false
+        streamAudio: Bool = false,
+        showIPInMenuBar: Bool = true
     ) {
         self.orientation = orientation
         self.portraitRotation = portraitRotation
@@ -88,6 +108,7 @@ struct DisplaySettings: Codable, Equatable, Sendable {
         self.refreshRate = refreshRate
         self.hiDPI = hiDPI
         self.streamAudio = streamAudio
+        self.showIPInMenuBar = showIPInMenuBar
     }
 
     init(from decoder: Decoder) throws {
@@ -98,6 +119,7 @@ struct DisplaySettings: Codable, Equatable, Sendable {
         self.refreshRate = try container.decodeIfPresent(Int.self, forKey: .refreshRate) ?? 60
         self.hiDPI = try container.decodeIfPresent(Bool.self, forKey: .hiDPI) ?? true
         self.streamAudio = try container.decodeIfPresent(Bool.self, forKey: .streamAudio) ?? false
+        self.showIPInMenuBar = try container.decodeIfPresent(Bool.self, forKey: .showIPInMenuBar) ?? true
     }
 
     var preset: SizePreset { SizePreset.all[min(max(sizeIndex, 0), SizePreset.all.count - 1)] }
@@ -176,6 +198,54 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var settings = DisplaySettings.load()
     private var isApplying = false
 
+    static func getIPv4Addresses() -> [NetworkAddress] {
+        var results: [NetworkAddress] = []
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else { return [] }
+        defer { freeifaddrs(ifaddr) }
+
+        for ptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
+            let flags = Int32(ptr.pointee.ifa_flags)
+            guard (flags & (IFF_UP | IFF_RUNNING)) == (IFF_UP | IFF_RUNNING),
+                  (flags & IFF_LOOPBACK) == 0,
+                  let addr = ptr.pointee.ifa_addr,
+                  addr.pointee.sa_family == UInt8(AF_INET)
+            else { continue }
+
+            var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(
+                addr,
+                socklen_t(addr.pointee.sa_len),
+                &hostname,
+                socklen_t(hostname.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            ) == 0 {
+                let ifName = String(cString: ptr.pointee.ifa_name)
+                let ip = String(cString: hostname)
+                if !ip.isEmpty && !ip.hasPrefix("127.") {
+                    results.append(NetworkAddress(interface: ifName, ip: ip))
+                }
+            }
+        }
+
+        return results.sorted { a, b in
+            let aScore = score(for: a)
+            let bScore = score(for: b)
+            if aScore != bScore { return aScore < bScore }
+            return a.interface < b.interface
+        }
+    }
+
+    private static func score(for addr: NetworkAddress) -> Int {
+        if addr.ip.hasPrefix("169.254.") { return 100 }
+        if addr.interface == "en0" { return 1 }
+        if addr.interface.hasPrefix("en") { return 2 }
+        if addr.interface.hasPrefix("utun") { return 10 }
+        return 20
+    }
+
     init(backend: StreamBackend) {
         self.backend = backend
         super.init()
@@ -207,6 +277,28 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let status = NSMenuItem(title: isApplying ? "Applying…" : backend.state.menuText, action: nil, keyEquivalent: "")
         status.isEnabled = false
         menu.addItem(status)
+
+        let addresses = Self.getIPv4Addresses()
+        if let primary = addresses.first {
+            let ipItem = NSMenuItem(title: "IP: \(primary.ip)  (Click to copy)", action: #selector(copyPrimaryIP), keyEquivalent: "")
+            ipItem.target = self
+            ipItem.toolTip = "Copy \(primary.ip) to clipboard"
+            menu.addItem(ipItem)
+
+            if addresses.count > 1 {
+                let subMenu = NSMenu()
+                for addr in addresses {
+                    let subItem = NSMenuItem(title: "\(addr.displayName)  (Click to copy)", action: #selector(copySelectedIP(_:)), keyEquivalent: "")
+                    subItem.representedObject = addr.ip
+                    subItem.target = self
+                    subItem.toolTip = "Copy \(addr.ip) to clipboard"
+                    subMenu.addItem(subItem)
+                }
+                let allIPsItem = NSMenuItem(title: "All Network IPs", action: nil, keyEquivalent: "")
+                allIPsItem.submenu = subMenu
+                menu.addItem(allIPsItem)
+            }
+        }
         menu.addItem(.separator())
 
         // Orientation: the must-have control.
@@ -291,6 +383,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
 
+        let showIP = NSMenuItem(title: "Show IP in menu bar", action: #selector(toggleShowIP), keyEquivalent: "")
+        showIP.target = self
+        showIP.state = settings.showIPInMenuBar ? .on : .off
+        menu.addItem(showIP)
+
         let login = NSMenuItem(title: "Open at login", action: #selector(toggleLogin), keyEquivalent: "")
         login.target = self
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
@@ -308,7 +405,16 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         case .portrait: symbol = "ipad"
         }
         statusItem.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "iPad display")
-        statusItem.button?.toolTip = backend.state.menuText
+
+        let primaryIP = Self.getIPv4Addresses().first?.ip
+        if settings.showIPInMenuBar, let primaryIP {
+            statusItem.button?.title = " \(primaryIP)"
+        } else {
+            statusItem.button?.title = ""
+        }
+
+        let ipInfo = primaryIP.map { " • IP: \($0)" } ?? ""
+        statusItem.button?.toolTip = "\(backend.state.menuText)\(ipInfo)"
         rebuildMenu()
     }
 
@@ -449,13 +555,42 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         NSApp.terminate(nil)
     }
 
+    @objc private func toggleShowIP() {
+        change { $0.showIPInMenuBar.toggle() }
+    }
+
+    @objc private func copyPrimaryIP() {
+        if let ip = Self.getIPv4Addresses().first?.ip {
+            copyToPasteboard(ip)
+        }
+    }
+
+    @objc private func copySelectedIP(_ sender: NSMenuItem) {
+        if let ip = sender.representedObject as? String {
+            copyToPasteboard(ip)
+        }
+    }
+
+    private func copyToPasteboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
     private func change(_ mutate: (inout DisplaySettings) -> Void) {
         var copy = settings
         mutate(&copy)
         guard copy != settings else { return }
+        let needsDisplayReapply = (copy.pixelSize != settings.pixelSize ||
+                                   copy.refreshRate != settings.refreshRate ||
+                                   copy.hiDPI != settings.hiDPI ||
+                                   copy.streamAudio != settings.streamAudio)
         settings = copy
         settings.save()
-        apply(settings)
+        if needsDisplayReapply {
+            apply(settings)
+        } else {
+            refreshIcon()
+        }
     }
 
     private func apply(_ new: DisplaySettings) {

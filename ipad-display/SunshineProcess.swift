@@ -448,6 +448,7 @@ nonisolated final class SunshineProcess: @unchecked Sendable {
            var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            var root = json["root"] as? [String: Any] {
             root["named_devices"] = []
+            root["devices"] = []
             json["root"] = root
             if let output = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
                 try? output.write(to: paths.state, options: .atomic)
@@ -491,7 +492,10 @@ nonisolated final class SunshineProcess: @unchecked Sendable {
                 // createSystemTapDescriptionForChannels: nop out cbz to muted tap branch
                 (0x1ad1b0, [0x80, 0x05, 0x00, 0x34], [0x1f, 0x20, 0x03, 0xd5]),
                 // createSystemTapDescriptionForChannels: force CATapUnmuted (0) instead of CATapMutedWhenTapped (1)
-                (0x1ad264, [0x22, 0x00, 0x80, 0x52], [0x02, 0x00, 0x80, 0x52])
+                (0x1ad264, [0x22, 0x00, 0x80, 0x52], [0x02, 0x00, 0x80, 0x52]),
+                // nvhttp::is_client_enabled: force return true (mov w0, #1; ret)
+                // Prevents "Client certificate identity is not enabled" SSL verification errors
+                (0x6dab0, [0xff, 0x83, 0x01, 0xd1, 0xf8, 0x5f, 0x02, 0xa9], [0x20, 0x00, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6])
             ]
             for patch in patches {
                 try? handle.seek(toOffset: patch.offset)

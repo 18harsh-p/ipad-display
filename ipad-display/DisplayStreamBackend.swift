@@ -172,6 +172,10 @@ final class DisplayStreamBackend: StreamBackend {
             let result: Result<Void, Error>
             do {
                 try await sunshine.unpairAll()
+                if let captureID = self.activeCaptureDisplayID, let settings = self.appliedSettings {
+                    self.sunshine.stop()
+                    try self.sunshine.start(displayID: captureID, streamAudio: settings.streamAudio)
+                }
                 result = .success(())
             } catch {
                 result = .failure(error)
