@@ -220,7 +220,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             ) == 0 {
                 let ifName = String(cString: ptr.pointee.ifa_name)
                 let ip = String(cString: hostname)
-                if !ip.isEmpty && !ip.hasPrefix("127.") {
+                if !ip.isEmpty && !ip.hasPrefix("127.") && !ip.hasPrefix("192.0.0.") {
                     results.append(NetworkAddress(interface: ifName, ip: ip))
                 }
             }
@@ -232,6 +232,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             if aScore != bScore { return aScore < bScore }
             return a.interface < b.interface
         }
+    }
+
+    static var localHostName: String {
+        let raw = ProcessInfo.processInfo.hostName
+        return raw.hasSuffix(".local") ? raw : "\(raw).local"
     }
 
     private static func score(for addr: NetworkAddress) -> Int {
@@ -273,6 +278,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let status = NSMenuItem(title: isApplying ? "Applying…" : backend.state.menuText, action: nil, keyEquivalent: "")
         status.isEnabled = false
         menu.addItem(status)
+
+        let hostName = Self.localHostName
+        let hostItem = NSMenuItem(title: "Host: \(hostName)  (Click to copy)", action: #selector(copyHostName), keyEquivalent: "")
+        hostItem.target = self
+        hostItem.toolTip = "Copy \(hostName) to clipboard (Enter in Moonlight on iPad)"
+        menu.addItem(hostItem)
 
         let addresses = Self.getIPv4Addresses()
         if let primary = addresses.first {
@@ -398,10 +409,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         statusItem.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "iPad display")
 
         statusItem.button?.title = ""
-        let primaryIP = Self.getIPv4Addresses().first?.ip
-
-        let ipInfo = primaryIP.map { " • IP: \($0)" } ?? ""
-        statusItem.button?.toolTip = "\(backend.state.menuText)\(ipInfo)"
+        let hostOrIP = Self.getIPv4Addresses().first?.ip ?? Self.localHostName
+        statusItem.button?.toolTip = "\(backend.state.menuText) • \(hostOrIP)"
         rebuildMenu()
     }
 
@@ -461,7 +470,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func pairDevice() {
         let alert = NSAlert()
         alert.messageText = "Pair new iPad"
-        alert.informativeText = "Open Moonlight on the iPad, tap your Mac, and enter the 4-digit PIN shown on the iPad:"
+        alert.informativeText = "Open Moonlight on the iPad. Tap your Mac (or tap '+' and enter '\(Self.localHostName)'), then enter the 4-digit PIN shown on the iPad:"
         alert.alertStyle = .informational
 
         let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 160, height: 24))
@@ -540,6 +549,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func quitApp() {
         backend.stop()
         NSApp.terminate(nil)
+    }
+
+    @objc private func copyHostName() {
+        copyToPasteboard(Self.localHostName)
     }
 
     @objc private func copyPrimaryIP() {

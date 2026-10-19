@@ -304,6 +304,7 @@ nonisolated final class SunshineProcess: @unchecked Sendable {
         fps = [30, 60]
         vt_software = allowed
         stream_audio = \(audioSetting)
+        address_family = both
 
         file_state = \(paths.state.path)
         credentials_file = \(paths.credentials.path)
