@@ -294,7 +294,10 @@ nonisolated final class SunshineProcess: @unchecked Sendable {
         try FileManager.default.createDirectory(at: paths.root, withIntermediateDirectories: true)
 
         let audioSetting = streamAudio ? "enabled" : "disabled"
+        let rawName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+        let sunshineName = rawName.replacingOccurrences(of: "\"", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
         let config = """
+        sunshine_name = \(sunshineName)
         output_name = \(displayID)
         min_log_level = info
         origin_web_ui_allowed = pc

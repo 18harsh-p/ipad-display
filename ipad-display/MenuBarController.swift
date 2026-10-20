@@ -16,6 +16,7 @@ import AppKit
 import CoreGraphics
 import Darwin
 import ServiceManagement
+import SystemConfiguration
 
 // MARK: - Model
 struct NetworkAddress: Sendable {
@@ -23,10 +24,12 @@ struct NetworkAddress: Sendable {
     let ip: String
 
     var displayName: String {
-        if interface == "en0" {
+        if ip.hasPrefix("169.254.") {
+            return "USB Cable (\(interface)): \(ip)"
+        } else if interface == "en0" {
             return "Wi-Fi (\(interface)): \(ip)"
         } else if interface.hasPrefix("en") {
-            return "Ethernet/USB (\(interface)): \(ip)"
+            return "Ethernet (\(interface)): \(ip)"
         } else if interface.hasPrefix("utun") {
             return "VPN (\(interface)): \(ip)"
         } else {
@@ -235,14 +238,24 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     static var localHostName: String {
+        if let scName = SCDynamicStoreCopyLocalHostName(nil) as String? {
+            let trimmed = scName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return "\(trimmed).local"
+            }
+        }
         let raw = ProcessInfo.processInfo.hostName
-        return raw.hasSuffix(".local") ? raw : "\(raw).local"
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasSuffix(".local") {
+            return trimmed
+        }
+        return "\(trimmed).local"
     }
 
     private static func score(for addr: NetworkAddress) -> Int {
-        if addr.ip.hasPrefix("169.254.") { return 100 }
         if addr.interface == "en0" { return 1 }
-        if addr.interface.hasPrefix("en") { return 2 }
+        if addr.ip.hasPrefix("169.254.") { return 2 }
+        if addr.interface.hasPrefix("en") { return 3 }
         if addr.interface.hasPrefix("utun") { return 10 }
         return 20
     }
@@ -282,7 +295,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let hostName = Self.localHostName
         let hostItem = NSMenuItem(title: "Host: \(hostName)  (Click to copy)", action: #selector(copyHostName), keyEquivalent: "")
         hostItem.target = self
-        hostItem.toolTip = "Copy \(hostName) to clipboard (Enter in Moonlight on iPad)"
+        hostItem.toolTip = "Copy \(hostName) to clipboard. Enter this in Moonlight on iPad to avoid retyping IP after restarts."
         menu.addItem(hostItem)
 
         let addresses = Self.getIPv4Addresses()
@@ -409,7 +422,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         statusItem.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "iPad display")
 
         statusItem.button?.title = ""
-        let hostOrIP = Self.getIPv4Addresses().first?.ip ?? Self.localHostName
+        let hostOrIP = Self.localHostName
         statusItem.button?.toolTip = "\(backend.state.menuText) • \(hostOrIP)"
         rebuildMenu()
     }
@@ -470,7 +483,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func pairDevice() {
         let alert = NSAlert()
         alert.messageText = "Pair new iPad"
-        alert.informativeText = "Open Moonlight on the iPad. Tap your Mac (or tap '+' and enter '\(Self.localHostName)'), then enter the 4-digit PIN shown on the iPad:"
+        let deviceName = Host.current().localizedName ?? "Mac"
+        alert.informativeText = "Open Moonlight on your iPad. Tap '\(deviceName)' (or tap '+' and enter '\(Self.localHostName)'), then enter the 4-digit PIN shown on the iPad:"
         alert.alertStyle = .informational
 
         let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 160, height: 24))
